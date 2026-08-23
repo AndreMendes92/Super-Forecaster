@@ -18,15 +18,11 @@ API_URL = st.secrets.get("API_URL", "http://127.0.0.1:8000")
 
 st.set_page_config(page_title="Forecast Tool", layout="wide")
 st.title("📈 Volume Forecast Tool")
-st.caption("Upload historical weekly volume, or use dummy data, and forecast ahead.")
+st.caption("Upload historical data, use dummy data, or pull a real public dataset — then forecast ahead.")
 
-# Colors for up to a handful of comparison lines
 METHOD_COLORS = ["#f97316", "#10b981", "#a855f7", "#ef4444"]
 
-# ---- Fetch available methods from the backend ----
-# Render's free tier "sleeps" after 15 min idle and can take 30-60s to wake
-# up on the first request. We give it a generous timeout and one retry so
-# a cold backend doesn't just get skipped over.
+
 def _fetch_methods():
     for timeout in (45, 20):
         try:
@@ -37,6 +33,7 @@ def _fetch_methods():
             continue
     return None, "Couldn't reach the backend to load the method list — defaulting to Holt-Winters. If this keeps happening, check API_URL in Secrets."
 
+
 with st.spinner("Connecting to backend (may take up to a minute if it's waking up)..."):
     available_methods, methods_error = _fetch_methods()
 
@@ -44,10 +41,10 @@ if available_methods is None:
     available_methods = {"holt_winters": "Holt-Winters (trend + seasonality)"}
     st.warning(methods_error)
 
-# ---- Sidebar: parameters ----
+# ---- Sidebar ----
 with st.sidebar:
     st.header("Settings")
-    weeks_ahead = st.slider("Weeks to forecast ahead", min_value=1, max_value=12, value=6)
+    weeks_ahead = st.slider("Periods to forecast ahead", min_value=1, max_value=12, value=6)
 
     selected_labels = st.multiselect(
         "Forecasting method(s) — pick more than one to compare",
@@ -57,23 +54,56 @@ with st.sidebar:
     label_to_key = {v: k for k, v in available_methods.items()}
     selected_methods = [label_to_key[label] for label in selected_labels]
 
-    seasonality_on = st.toggle(
-        "Factor in seasonality (applies to Holt-Winters only)", value=True
-    )
+    seasonality_on = st.toggle("Factor in seasonality", value=True)
     st.divider()
 
-    use_dummy = st.checkbox("Use dummy data (no file needed)", value=True)
+    data_source = st.radio(
+        "Data source",
+        ["Use dummy data", "Upload my own CSV", "Pull real data (StatCan)"],
+    )
+
     uploaded_file = None
-    if not use_dummy:
+    statcan_vector_id = None
+    statcan_periods = 60
+
+    if data_source == "Upload my own CSV":
         uploaded_file = st.file_uploader(
-            "Upload your own CSV — needs exactly two columns named "
-            "'week_start' (YYYY-MM-DD) and 'volume' (a number)",
+            "CSV needs exactly two columns named 'week_start' (YYYY-MM-DD) and 'volume' (a number)",
             type="csv",
         )
+    elif data_source == "Pull real data (StatCan)":
+        st.caption(
+            "Pulls a real time series from Statistics Canada's free public API. "
+            "Data is monthly, so seasonality here means a 12-month cycle."
+        )
+        statcan_vector_id = st.text_input(
+            "StatCan vector ID",
+            value="111955442",
+            help="Default is Canada's New Housing Price Index (Total, house+land). "
+                 "To find a BC or city-specific vector: open the relevant StatCan "
+                 "table page → 'Add/Remove data' → 'Customize layout' → tick "
+                 "'Display vector identifier and coordinate' → Apply. The table "
+                 "will show a 'Vector' column per geography.",
+        )
+        statcan_periods = st.number_input(
+            "How many recent months to pull", min_value=8, max_value=300, value=60
+        )
+        with st.expander("Where do I find other vector IDs?"):
+            st.markdown(
+                "1. Go to a StatCan table page, e.g. "
+                "[New Housing Price Index](https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1810020501)\n"
+                "2. Click **Add/Remove data**\n"
+                "3. Click **Customize layout**\n"
+                "4. Tick **Display vector identifier and coordinate**, click Apply\n"
+                "5. A **Vector** column appears — pick the row for the geography "
+                "you want (e.g. British Columbia, or a specific city's CMA)"
+            )
 
-# ---- Get the historical data as a CSV in memory ----
+# ---- Get the historical data as a CSV in memory, and figure out freq ----
 csv_bytes = None
-if use_dummy:
+freq = "W"
+
+if data_source == "Use dummy data":
     resp = requests.get(f"{API_URL}/dummy-data", params={"weeks_of_history": 104}, timeout=60)
     if resp.status_code == 200:
         data = resp.json()
@@ -83,8 +113,30 @@ if use_dummy:
         csv_bytes = buf.getvalue().encode()
     else:
         st.error("Could not reach the backend to generate dummy data.")
-elif uploaded_file is not None:
+
+elif data_source == "Upload my own CSV" and uploaded_file is not None:
     csv_bytes = uploaded_file.getvalue()
+
+elif data_source == "Pull real data (StatCan)" and statcan_vector_id:
+    freq = "M"
+    try:
+        with st.spinner(f"Pulling vector {statcan_vector_id} from Statistics Canada..."):
+            resp = requests.get(
+                f"{API_URL}/statcan/vector/{statcan_vector_id}",
+                params={"periods": int(statcan_periods)},
+                timeout=45,
+            )
+        if resp.status_code == 200:
+            data = resp.json()
+            df = pd.DataFrame({"week_start": data["week_start"], "volume": data["volume"]})
+            buf = io.StringIO()
+            df.to_csv(buf, index=False)
+            csv_bytes = buf.getvalue().encode()
+            st.success(f"Pulled {len(df)} months of real data for vector {statcan_vector_id}.")
+        else:
+            st.error(f"StatCan fetch failed: {resp.json().get('detail', resp.text)}")
+    except requests.exceptions.RequestException as e:
+        st.error(f"Could not reach the backend/StatCan: {e}")
 
 # ---- Run forecast and display ----
 if not selected_methods:
@@ -95,6 +147,7 @@ elif csv_bytes:
         "weeks_ahead": weeks_ahead,
         "seasonality_on": seasonality_on,
         "methods": ",".join(selected_methods),
+        "freq": freq,
     }
 
     with st.spinner("Running forecast..."):
@@ -105,15 +158,16 @@ elif csv_bytes:
     else:
         result = resp.json()
         history_df = pd.DataFrame(result["history"])
+        period_label = "months" if freq == "M" else "weeks"
 
         col1, col2 = st.columns(2)
-        col1.metric("Weeks of history", len(history_df))
-        col2.metric("Forecasting ahead", f"{weeks_ahead} week{'s' if weeks_ahead > 1 else ''}")
+        col1.metric(f"{period_label.capitalize()} of history", len(history_df))
+        col2.metric("Forecasting ahead", f"{weeks_ahead} {period_label[:-1] if weeks_ahead == 1 else period_label}")
 
         fig = go.Figure()
         fig.add_trace(go.Scatter(
             x=history_df["week_start"], y=history_df["volume"],
-            mode="lines", name="Historical volume", line=dict(color="#2563eb"),
+            mode="lines", name="Historical", line=dict(color="#2563eb"),
         ))
 
         comparison_rows = {}
@@ -130,23 +184,20 @@ elif csv_bytes:
             comparison_rows[fdata["label"]] = fdf.set_index("week_start")["forecast_volume"]
 
         fig.update_layout(
-            title="Historical Volume & Forecast",
-            xaxis_title="Week", yaxis_title="Volume",
+            title="Historical Data & Forecast",
+            xaxis_title="Period", yaxis_title="Value",
             hovermode="x unified", height=500,
         )
         st.plotly_chart(fig, width='stretch')
 
         if len(comparison_rows) > 1:
-            st.subheader("Compare methods, week by week")
+            st.subheader("Compare methods, period by period")
             compare_df = pd.DataFrame(comparison_rows)
-            compare_df.index.name = "week_start"
+            compare_df.index.name = "period_start"
             st.dataframe(compare_df, width='stretch')
         else:
             with st.expander("See forecast numbers"):
                 only_df = list(comparison_rows.values())[0].reset_index()
                 st.dataframe(only_df, width='stretch', hide_index=True)
 else:
-    st.info(
-        "Check 'Use dummy data' in the sidebar to try it instantly, "
-        "or uncheck it to upload your own CSV file."
-    )
+    st.info("Choose a data source in the sidebar to get started.")
