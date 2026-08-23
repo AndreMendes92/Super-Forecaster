@@ -1,15 +1,11 @@
 """
 app.py — the screen you actually look at
 ------------------------------------------
-This is a Streamlit app: a way to build a web page using only Python
-(no HTML/CSS/JavaScript needed). It talks to the FastAPI backend
-(main.py) over HTTP, the same way a browser would.
+Streamlit frontend. Talks to the FastAPI backend over HTTP.
 
 Run it locally with:
     streamlit run app.py
-
-Before running, make sure the backend is running too (in another
-terminal): uvicorn main:app --reload   (from the backend/ folder)
+(make sure the backend is running too, from backend/: uvicorn main:app --reload)
 """
 
 import io
@@ -18,25 +14,48 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 
-# Change this to your deployed backend URL once it's hosted online,
-# e.g. "https://your-app-name.onrender.com"
 API_URL = st.secrets.get("API_URL", "http://127.0.0.1:8000")
 
 st.set_page_config(page_title="Forecast Tool", layout="wide")
 st.title("📈 Volume Forecast Tool")
 st.caption("Upload historical weekly volume, or use dummy data, and forecast ahead.")
 
+# Colors for up to a handful of comparison lines
+METHOD_COLORS = ["#f97316", "#10b981", "#a855f7", "#ef4444"]
+
+# ---- Fetch available methods from the backend ----
+try:
+    methods_resp = requests.get(f"{API_URL}/methods", timeout=10)
+    available_methods = methods_resp.json() if methods_resp.status_code == 200 else {"holt_winters": "Holt-Winters (trend + seasonality)"}
+except requests.exceptions.RequestException:
+    available_methods = {"holt_winters": "Holt-Winters (trend + seasonality)"}
+    st.warning("Couldn't reach the backend to load method list — defaulting to Holt-Winters. Check API_URL.")
+
 # ---- Sidebar: parameters ----
 with st.sidebar:
     st.header("Settings")
     weeks_ahead = st.slider("Weeks to forecast ahead", min_value=1, max_value=12, value=6)
-    seasonality_on = st.toggle("Factor in seasonality", value=True)
+
+    selected_labels = st.multiselect(
+        "Forecasting method(s) — pick more than one to compare",
+        options=list(available_methods.values()),
+        default=[available_methods.get("holt_winters", list(available_methods.values())[0])],
+    )
+    label_to_key = {v: k for k, v in available_methods.items()}
+    selected_methods = [label_to_key[label] for label in selected_labels]
+
+    seasonality_on = st.toggle(
+        "Factor in seasonality (applies to Holt-Winters only)", value=True
+    )
     st.divider()
+
     use_dummy = st.checkbox("Use dummy data (no file needed)", value=True)
     uploaded_file = None
     if not use_dummy:
         uploaded_file = st.file_uploader(
-            "Upload CSV (columns: week_start, volume)", type="csv"
+            "Upload your own CSV — needs exactly two columns named "
+            "'week_start' (YYYY-MM-DD) and 'volume' (a number)",
+            type="csv",
         )
 
 # ---- Get the historical data as a CSV in memory ----
@@ -55,9 +74,15 @@ elif uploaded_file is not None:
     csv_bytes = uploaded_file.getvalue()
 
 # ---- Run forecast and display ----
-if csv_bytes:
+if not selected_methods:
+    st.info("Pick at least one forecasting method in the sidebar.")
+elif csv_bytes:
     files = {"file": ("data.csv", csv_bytes, "text/csv")}
-    params = {"weeks_ahead": weeks_ahead, "seasonality_on": seasonality_on}
+    params = {
+        "weeks_ahead": weeks_ahead,
+        "seasonality_on": seasonality_on,
+        "methods": ",".join(selected_methods),
+    }
 
     with st.spinner("Running forecast..."):
         resp = requests.post(f"{API_URL}/forecast", files=files, params=params)
@@ -67,25 +92,30 @@ if csv_bytes:
     else:
         result = resp.json()
         history_df = pd.DataFrame(result["history"])
-        forecast_df = pd.DataFrame(result["forecast"])
 
-        if result["note"]:
-            st.info(result["note"])
-
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns(2)
         col1.metric("Weeks of history", len(history_df))
         col2.metric("Forecasting ahead", f"{weeks_ahead} week{'s' if weeks_ahead > 1 else ''}")
-        col3.metric("Seasonality used", "Yes" if result["used_seasonality"] else "No")
 
         fig = go.Figure()
         fig.add_trace(go.Scatter(
             x=history_df["week_start"], y=history_df["volume"],
             mode="lines", name="Historical volume", line=dict(color="#2563eb"),
         ))
-        fig.add_trace(go.Scatter(
-            x=forecast_df["week_start"], y=forecast_df["forecast_volume"],
-            mode="lines+markers", name="Forecast", line=dict(color="#f97316", dash="dash"),
-        ))
+
+        comparison_rows = {}
+        for i, (method_key, fdata) in enumerate(result["forecasts"].items()):
+            color = METHOD_COLORS[i % len(METHOD_COLORS)]
+            fdf = pd.DataFrame(fdata["values"])
+            fig.add_trace(go.Scatter(
+                x=fdf["week_start"], y=fdf["forecast_volume"],
+                mode="lines+markers", name=fdata["label"],
+                line=dict(color=color, dash="dash"),
+            ))
+            if fdata["note"]:
+                st.info(f"**{fdata['label']}**: {fdata['note']}")
+            comparison_rows[fdata["label"]] = fdf.set_index("week_start")["forecast_volume"]
+
         fig.update_layout(
             title="Historical Volume & Forecast",
             xaxis_title="Week", yaxis_title="Volume",
@@ -93,7 +123,17 @@ if csv_bytes:
         )
         st.plotly_chart(fig, use_container_width=True)
 
-        with st.expander("See forecast numbers"):
-            st.dataframe(forecast_df, use_container_width=True, hide_index=True)
+        if len(comparison_rows) > 1:
+            st.subheader("Compare methods, week by week")
+            compare_df = pd.DataFrame(comparison_rows)
+            compare_df.index.name = "week_start"
+            st.dataframe(compare_df, use_container_width=True)
+        else:
+            with st.expander("See forecast numbers"):
+                only_df = list(comparison_rows.values())[0].reset_index()
+                st.dataframe(only_df, use_container_width=True, hide_index=True)
 else:
-    st.info("Upload a CSV or check 'Use dummy data' in the sidebar to get started.")
+    st.info(
+        "Check 'Use dummy data' in the sidebar to try it instantly, "
+        "or uncheck it to upload your own CSV file."
+    )
