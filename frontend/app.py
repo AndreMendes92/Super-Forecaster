@@ -24,12 +24,25 @@ st.caption("Upload historical weekly volume, or use dummy data, and forecast ahe
 METHOD_COLORS = ["#f97316", "#10b981", "#a855f7", "#ef4444"]
 
 # ---- Fetch available methods from the backend ----
-try:
-    methods_resp = requests.get(f"{API_URL}/methods", timeout=10)
-    available_methods = methods_resp.json() if methods_resp.status_code == 200 else {"holt_winters": "Holt-Winters (trend + seasonality)"}
-except requests.exceptions.RequestException:
+# Render's free tier "sleeps" after 15 min idle and can take 30-60s to wake
+# up on the first request. We give it a generous timeout and one retry so
+# a cold backend doesn't just get skipped over.
+def _fetch_methods():
+    for timeout in (45, 20):
+        try:
+            resp = requests.get(f"{API_URL}/methods", timeout=timeout)
+            if resp.status_code == 200:
+                return resp.json(), None
+        except requests.exceptions.RequestException:
+            continue
+    return None, "Couldn't reach the backend to load the method list — defaulting to Holt-Winters. If this keeps happening, check API_URL in Secrets."
+
+with st.spinner("Connecting to backend (may take up to a minute if it's waking up)..."):
+    available_methods, methods_error = _fetch_methods()
+
+if available_methods is None:
     available_methods = {"holt_winters": "Holt-Winters (trend + seasonality)"}
-    st.warning("Couldn't reach the backend to load method list — defaulting to Holt-Winters. Check API_URL.")
+    st.warning(methods_error)
 
 # ---- Sidebar: parameters ----
 with st.sidebar:
@@ -61,7 +74,7 @@ with st.sidebar:
 # ---- Get the historical data as a CSV in memory ----
 csv_bytes = None
 if use_dummy:
-    resp = requests.get(f"{API_URL}/dummy-data", params={"weeks_of_history": 104})
+    resp = requests.get(f"{API_URL}/dummy-data", params={"weeks_of_history": 104}, timeout=60)
     if resp.status_code == 200:
         data = resp.json()
         df = pd.DataFrame({"week_start": data["week_start"], "volume": data["volume"]})
@@ -85,7 +98,7 @@ elif csv_bytes:
     }
 
     with st.spinner("Running forecast..."):
-        resp = requests.post(f"{API_URL}/forecast", files=files, params=params)
+        resp = requests.post(f"{API_URL}/forecast", files=files, params=params, timeout=60)
 
     if resp.status_code != 200:
         st.error(f"Forecast failed: {resp.json().get('detail', resp.text)}")
@@ -121,17 +134,17 @@ elif csv_bytes:
             xaxis_title="Week", yaxis_title="Volume",
             hovermode="x unified", height=500,
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
         if len(comparison_rows) > 1:
             st.subheader("Compare methods, week by week")
             compare_df = pd.DataFrame(comparison_rows)
             compare_df.index.name = "week_start"
-            st.dataframe(compare_df, use_container_width=True)
+            st.dataframe(compare_df, width='stretch')
         else:
             with st.expander("See forecast numbers"):
                 only_df = list(comparison_rows.values())[0].reset_index()
-                st.dataframe(only_df, use_container_width=True, hide_index=True)
+                st.dataframe(only_df, width='stretch', hide_index=True)
 else:
     st.info(
         "Check 'Use dummy data' in the sidebar to try it instantly, "
