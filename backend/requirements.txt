@@ -4,3 +4,4 @@ pandas
 statsmodels
 python-multipart
 numpy
+requests

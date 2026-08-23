@@ -1,20 +1,23 @@
 """
 main.py — the web API
 ----------------------
-GET  /methods        -> lists which forecasting methods are available
-GET  /dummy-data      -> returns fake historical data (for testing)
-POST /forecast        -> upload historical data + parameters,
-                          get back a forecast from one or more methods
+GET  /methods              -> lists available forecasting methods
+GET  /dummy-data            -> fake historical data (for testing)
+GET  /statcan/vector/{id}   -> pulls a real time series from Statistics
+                                Canada's free public API
+POST /forecast              -> upload historical data + parameters,
+                                get back a forecast from one or more methods
 """
 
 import io
 import numpy as np
 import pandas as pd
+import requests as http_requests
 from fastapi import FastAPI, UploadFile, File, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 
 from forecast_engine import run_multi_forecast, AVAILABLE_METHODS
+from data_sources.statcan import fetch_statcan_vector
 
 app = FastAPI(title="Forecast Tool API")
 
@@ -33,7 +36,6 @@ def root():
 
 @app.get("/methods")
 def methods():
-    """List available forecasting methods, for the frontend to build a picker."""
     return AVAILABLE_METHODS
 
 
@@ -56,12 +58,39 @@ def dummy_data(weeks_of_history: int = Query(104, ge=8, le=260)):
     }
 
 
+@app.get("/statcan/vector/{vector_id}")
+def statcan_vector(
+    vector_id: int,
+    periods: int = Query(120, ge=8, le=500, description="How many recent data points to pull"),
+):
+    """
+    Pulls a real time series from Statistics Canada's free public API.
+    Find vector IDs on any StatCan table page — see data_sources/statcan.py
+    for the step-by-step. Returns data shaped the same way as
+    /dummy-data, so it's a drop-in real-data replacement (monthly,
+    not weekly — use freq=M when calling /forecast with this data).
+    """
+    try:
+        df = fetch_statcan_vector(vector_id, latest_n=periods)
+    except http_requests.exceptions.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"Could not reach Statistics Canada's API: {e}")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {
+        "vector_id": vector_id,
+        "week_start": [d.strftime("%Y-%m-%d") for d in df["period_start"]],
+        "volume": df["value"].tolist(),
+    }
+
+
 @app.post("/forecast")
 async def forecast(
     file: UploadFile = File(..., description="CSV with columns: week_start, volume"),
-    weeks_ahead: int = Query(6, ge=1, le=12, description="How many weeks to forecast (1-12)"),
-    seasonality_on: bool = Query(True, description="Factor in repeating yearly pattern (Holt-Winters only)"),
-    methods: str = Query("holt_winters", description="Comma-separated method keys, e.g. 'holt_winters,linear_trend'"),
+    weeks_ahead: int = Query(6, ge=1, le=12, description="How many periods ahead to forecast (1-12)"),
+    seasonality_on: bool = Query(True, description="Factor in repeating seasonal pattern"),
+    methods: str = Query("holt_winters", description="Comma-separated method keys"),
+    freq: str = Query("W", pattern="^(W|M)$", description="Data frequency: W=weekly, M=monthly"),
 ):
     try:
         contents = await file.read()
@@ -79,14 +108,15 @@ async def forecast(
 
     try:
         history_df, results, unknown = run_multi_forecast(
-            df, weeks_ahead=weeks_ahead, seasonality_on=seasonality_on, methods=method_list
+            df, weeks_ahead=weeks_ahead, seasonality_on=seasonality_on,
+            methods=method_list, freq=freq,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     response = {
         "history": [
-            {"week_start": row.week_start.strftime("%Y-%m-%d"), "volume": int(row.volume)}
+            {"week_start": row.week_start.strftime("%Y-%m-%d"), "volume": float(row.volume)}
             for row in history_df.itertuples()
         ],
         "forecasts": {},
