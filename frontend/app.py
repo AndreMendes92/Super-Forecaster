@@ -59,12 +59,16 @@ with st.sidebar:
 
     data_source = st.radio(
         "Data source",
-        ["Use dummy data", "Upload my own CSV", "Pull real data (StatCan)"],
+        ["Use dummy data", "Upload my own CSV", "Pull real data (StatCan)", "Pull real MLS prices (Repliers)"],
     )
 
     uploaded_file = None
     statcan_vector_id = None
     statcan_periods = 60
+    repliers_city = None
+    repliers_property_type = None
+    repliers_months = 24
+    repliers_stat = "avg"
 
     if data_source == "Upload my own CSV":
         uploaded_file = st.file_uploader(
@@ -98,6 +102,26 @@ with st.sidebar:
                 "5. A **Vector** column appears — pick the row for the geography "
                 "you want (e.g. British Columbia, or a specific city's CMA)"
             )
+    elif data_source == "Pull real MLS prices (Repliers)":
+        st.caption(
+            "Pulls real sold-price statistics from the Repliers MLS API. "
+            "On a free/sandbox key this returns realistic sample data, "
+            "not real listings — upgrade to a production key for real prices."
+        )
+        repliers_city = st.text_input("City", value="Toronto")
+
+        try:
+            ptypes_resp = requests.get(f"{API_URL}/repliers/property-types", timeout=15)
+            property_type_options = ["All types"] + ptypes_resp.json() if ptypes_resp.status_code == 200 else ["All types"]
+        except requests.exceptions.RequestException:
+            property_type_options = ["All types"]
+
+        repliers_property_type = st.selectbox("Property type", property_type_options)
+        if repliers_property_type == "All types":
+            repliers_property_type = None
+
+        repliers_months = st.number_input("How many recent months to pull", min_value=6, max_value=120, value=24)
+        repliers_stat = st.radio("Statistic", ["avg", "med"], format_func=lambda x: "Average" if x == "avg" else "Median", horizontal=True)
 
 # ---- Get the historical data as a CSV in memory, and figure out freq ----
 csv_bytes = None
@@ -137,6 +161,33 @@ elif data_source == "Pull real data (StatCan)" and statcan_vector_id:
             st.error(f"StatCan fetch failed: {resp.json().get('detail', resp.text)}")
     except requests.exceptions.RequestException as e:
         st.error(f"Could not reach the backend/StatCan: {e}")
+
+elif data_source == "Pull real MLS prices (Repliers)" and repliers_city:
+    freq = "M"
+    try:
+        label = f"{repliers_stat} sold price for {repliers_property_type or 'all property types'} in {repliers_city}"
+        with st.spinner(f"Pulling {label} from Repliers..."):
+            resp = requests.get(
+                f"{API_URL}/repliers/price-history",
+                params={
+                    "city": repliers_city,
+                    "property_type": repliers_property_type,
+                    "months_back": int(repliers_months),
+                    "stat": repliers_stat,
+                },
+                timeout=45,
+            )
+        if resp.status_code == 200:
+            data = resp.json()
+            df = pd.DataFrame({"week_start": data["week_start"], "volume": data["volume"]})
+            buf = io.StringIO()
+            df.to_csv(buf, index=False)
+            csv_bytes = buf.getvalue().encode()
+            st.success(f"Pulled {len(df)} months of {label}.")
+        else:
+            st.error(f"Repliers fetch failed: {resp.json().get('detail', resp.text)}")
+    except requests.exceptions.RequestException as e:
+        st.error(f"Could not reach the backend/Repliers: {e}")
 
 # ---- Run forecast and display ----
 if not selected_methods:
