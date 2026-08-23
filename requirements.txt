@@ -1,6 +1,4 @@
-fastapi
-uvicorn[standard]
+streamlit
+requests
 pandas
-statsmodels
-python-multipart
-numpy
+plotly
