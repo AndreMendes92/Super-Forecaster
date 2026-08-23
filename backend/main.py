@@ -3,10 +3,10 @@ main.py — the web API
 ----------------------
 GET  /methods              -> lists available forecasting methods
 GET  /dummy-data            -> fake historical data (for testing)
-GET  /statcan/vector/{id}   -> pulls a real time series from Statistics
-                                Canada's free public API
-POST /forecast              -> upload historical data + parameters,
-                                get back a forecast from one or more methods
+GET  /statcan/vector/{id}   -> real time series from Statistics Canada
+GET  /repliers/price-history -> real (or sandbox) MLS sold-price stats
+POST /forecast               -> upload historical data + parameters,
+                                 get back a forecast from one or more methods
 """
 
 import io
@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from forecast_engine import run_multi_forecast, AVAILABLE_METHODS
 from data_sources.statcan import fetch_statcan_vector
+from data_sources.repliers import fetch_repliers_price_history, COMMON_PROPERTY_TYPES
 
 app = FastAPI(title="Forecast Tool API")
 
@@ -63,13 +64,6 @@ def statcan_vector(
     vector_id: int,
     periods: int = Query(120, ge=8, le=500, description="How many recent data points to pull"),
 ):
-    """
-    Pulls a real time series from Statistics Canada's free public API.
-    Find vector IDs on any StatCan table page — see data_sources/statcan.py
-    for the step-by-step. Returns data shaped the same way as
-    /dummy-data, so it's a drop-in real-data replacement (monthly,
-    not weekly — use freq=M when calling /forecast with this data).
-    """
     try:
         df = fetch_statcan_vector(vector_id, latest_n=periods)
     except http_requests.exceptions.RequestException as e:
@@ -81,6 +75,40 @@ def statcan_vector(
         "vector_id": vector_id,
         "week_start": [d.strftime("%Y-%m-%d") for d in df["period_start"]],
         "volume": df["value"].tolist(),
+    }
+
+
+@app.get("/repliers/property-types")
+def repliers_property_types():
+    """Common property type values to populate a dropdown with."""
+    return COMMON_PROPERTY_TYPES
+
+
+@app.get("/repliers/price-history")
+def repliers_price_history(
+    city: str = Query(..., description="City name, e.g. 'Vancouver'"),
+    property_type: str = Query(None, description="e.g. 'Condo Apt', 'Detached' — omit for all types"),
+    months_back: int = Query(24, ge=6, le=120),
+    stat: str = Query("avg", pattern="^(avg|med)$", description="avg or med sold price"),
+):
+    try:
+        df = fetch_repliers_price_history(
+            city=city, property_type=property_type, months_back=months_back, stat=stat
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except http_requests.exceptions.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"Repliers API error: {e}")
+    except http_requests.exceptions.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"Could not reach Repliers API: {e}")
+
+    return {
+        "city": city,
+        "property_type": property_type,
+        "stat": stat,
+        "week_start": [d.strftime("%Y-%m-%d") for d in df["period_start"]],
+        "volume": df["value"].tolist(),
+        "sample_counts": df["count"].tolist(),
     }
 
 
