@@ -69,6 +69,7 @@ with st.sidebar:
     repliers_property_type = None
     repliers_months = 24
     repliers_stat = "avg"
+    is_index_data = False
 
     if data_source == "Upload my own CSV":
         uploaded_file = st.file_uploader(
@@ -102,22 +103,46 @@ with st.sidebar:
                 "5. A **Vector** column appears — pick the row for the geography "
                 "you want (e.g. British Columbia, or a specific city's CMA)"
             )
+        is_index_data = st.checkbox(
+            "This is a price index (e.g. NHPI) — show % change from start instead of raw index points",
+            value=True,
+            help="An index like StatCan's NHPI has no dollar meaning on its own — "
+                 "100 is just the baseline period. Showing % change from the start "
+                 "of your pulled history makes the trend directly readable.",
+        )
     elif data_source == "Pull real MLS prices (Repliers)":
         st.caption(
             "Pulls real sold-price statistics from the Repliers MLS API. "
             "On a free/sandbox key this returns realistic sample data, "
             "not real listings — upgrade to a production key for real prices."
         )
-        repliers_city = st.text_input("City", value="Toronto")
 
         try:
-            ptypes_resp = requests.get(f"{API_URL}/repliers/property-types", timeout=15)
-            property_type_options = ["All types"] + ptypes_resp.json() if ptypes_resp.status_code == 200 else ["All types"]
-        except requests.exceptions.RequestException:
-            property_type_options = ["All types"]
+            agg_resp = requests.get(f"{API_URL}/repliers/aggregates", timeout=30)
+            if agg_resp.status_code == 200:
+                agg_data = agg_resp.json()
+                city_options = [c["value"] for c in agg_data["cities"][:30]]
+                type_options = [p["value"] for p in agg_data["property_types"]]
+            else:
+                city_options, type_options = [], []
+                st.warning(f"Couldn't load real city/property-type list: {agg_resp.json().get('detail', '')}")
+        except requests.exceptions.RequestException as e:
+            city_options, type_options = [], []
+            st.warning(f"Couldn't reach backend to load city/property-type list: {e}")
 
-        repliers_property_type = st.selectbox("Property type", property_type_options)
-        if repliers_property_type == "All types":
+        if city_options:
+            repliers_city = st.selectbox(
+                "City (from your account's actual data)", city_options,
+            )
+        else:
+            st.info("Falling back to free text — city list unavailable.")
+            repliers_city = st.text_input("City", value="Toronto")
+
+        if type_options:
+            repliers_property_type = st.selectbox("Property type", ["All types"] + type_options)
+            if repliers_property_type == "All types":
+                repliers_property_type = None
+        else:
             repliers_property_type = None
 
         repliers_months = st.number_input("How many recent months to pull", min_value=6, max_value=120, value=24)
@@ -211,6 +236,23 @@ elif csv_bytes:
         history_df = pd.DataFrame(result["history"])
         period_label = "months" if freq == "M" else "weeks"
 
+        # If this is index data (e.g. NHPI), convert raw index points to
+        # % change from the start of the pulled history — the index level
+        # itself has no dollar meaning, but % change from a fixed point is
+        # directly interpretable.
+        baseline = None
+        y_label = "Value"
+        if is_index_data and len(history_df) > 0:
+            baseline = history_df["volume"].iloc[0]
+            baseline_date = history_df["week_start"].iloc[0]
+            history_df = history_df.copy()
+            history_df["volume"] = (history_df["volume"] / baseline - 1) * 100
+            y_label = f"% change since {baseline_date}"
+            st.caption(
+                f"Showing % change relative to {baseline_date} (index value "
+                f"{baseline:.1f} at that point = 0% on this chart)."
+            )
+
         col1, col2 = st.columns(2)
         col1.metric(f"{period_label.capitalize()} of history", len(history_df))
         col2.metric("Forecasting ahead", f"{weeks_ahead} {period_label[:-1] if weeks_ahead == 1 else period_label}")
@@ -225,6 +267,9 @@ elif csv_bytes:
         for i, (method_key, fdata) in enumerate(result["forecasts"].items()):
             color = METHOD_COLORS[i % len(METHOD_COLORS)]
             fdf = pd.DataFrame(fdata["values"])
+            if baseline is not None:
+                fdf = fdf.copy()
+                fdf["forecast_volume"] = (fdf["forecast_volume"] / baseline - 1) * 100
             fig.add_trace(go.Scatter(
                 x=fdf["week_start"], y=fdf["forecast_volume"],
                 mode="lines+markers", name=fdata["label"],
@@ -236,7 +281,7 @@ elif csv_bytes:
 
         fig.update_layout(
             title="Historical Data & Forecast",
-            xaxis_title="Period", yaxis_title="Value",
+            xaxis_title="Period", yaxis_title=y_label,
             hovermode="x unified", height=500,
         )
         st.plotly_chart(fig, width='stretch')
