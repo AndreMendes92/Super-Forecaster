@@ -72,9 +72,33 @@ to grab.
    (where the backend lives) can't reach Supabase's direct-connection
    address, and the pooler is the option meant for exactly this case
    (an app hosted elsewhere connecting in).
-5. Copy the **URI** shown under Session pooler. It looks like:
-   `postgresql://postgres.xxxxxxxxxxxx:[YOUR-PASSWORD]@aws-0-<region>.pooler.supabase.com:5432/postgres`
-6. Replace `[YOUR-PASSWORD]` with the database password from step 2. Save the final string — you'll paste it into Render in step 3 below, as `DATABASE_URL`.
+5. What you see next depends on which layout Supabase gives you:
+
+   - **A ready-made string** — copy the **URI** shown under Session
+     pooler. It looks like:
+     `postgresql://postgres.xxxxxxxxxxxx:[YOUR-PASSWORD]@aws-0-<region>.pooler.supabase.com:5432/postgres`
+     Replace the literal text `[YOUR-PASSWORD]` (brackets and all)
+     with the database password from step 2 — leave everything else
+     in the string untouched.
+   - **Separate fields instead** (a "Connection parameters" card
+     showing `host`, `port`, `database`, `user` one by one, with no
+     single string to copy) — assemble it yourself in this shape:
+     `postgresql://USER:PASSWORD@HOST:PORT/DATABASE`
+     using the `user`, `host`, `port`, and `database` values shown
+     (typically `user` looks like `postgres.xxxxxxxxxxxx` and
+     `database` is `postgres`), and the password from step 2 for
+     `PASSWORD`. There's a **"Reset database password"** button right
+     on that same card if you don't remember it — click it, set a new
+     one, and use that.
+
+   Either way, save the finished string — you'll paste it into Render
+   in step 3 below, as `DATABASE_URL`.
+
+   If your password has characters like `@ : / # ?` in it, Supabase's
+   own note ("percent-encode them") is correct but fiddly — simpler
+   to just reset the password to letters-and-numbers-only (e.g.
+   `Sunflower92`) via that same button, so you can skip encoding
+   entirely.
 
 If you truly can't find a "Connect" button anywhere: open any table in
 the **Table Editor**, and Supabase shows a "Connect via" shortcut
