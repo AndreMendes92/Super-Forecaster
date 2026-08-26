@@ -41,7 +41,7 @@ _HEADERS = {
 }
 
 
-def post_json(url: str, body, timeout: int = 30):
+def post_json(url: str, body, timeout: int = 15):
     """
     POSTs JSON to a StatCan WDS endpoint, impersonating a real Chrome
     browser's TLS fingerprint, and returns the parsed JSON response.
@@ -51,6 +51,16 @@ def post_json(url: str, body, timeout: int = 30):
     hierarchies) on any network or HTTP-status failure, so every
     caller can keep catching one familiar exception type regardless of
     which HTTP client is doing the actual work underneath.
+
+    timeout defaults to 15s (not the more generous 30s you might
+    expect) deliberately: a slow-but-alive StatCan response can lose a
+    race against Render's own gateway timeout, which then serves its
+    own raw HTML 502 page instead of letting our code return a clean
+    JSON error. Failing fast here means our error handling actually
+    gets to run. The one caller with no such time pressure — the
+    daily background cache refresh in statcan_cache.py — benefits too,
+    since it bounds how long a full refresh over dozens of locations
+    can possibly take.
     """
     try:
         resp = cf_requests.post(

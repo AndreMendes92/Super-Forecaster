@@ -7,6 +7,10 @@ GET  /statcan/vector/{id}       -> real time series from Statistics Canada, by r
 GET  /statcan/geographies       -> every location StatCan's housing index covers
 GET  /statcan/housing-types     -> the 3 index components StatCan tracks
 GET  /statcan/price             -> real StatCan housing index series, by location name
+POST /statcan/refresh-cache     -> (secret-protected) refreshes the StatCan data
+                                     cache in the background. Meant to be called
+                                     once a day by a GitHub Actions cron job, ahead
+                                     of /run-alerts.
 GET  /repliers/price-history    -> real (or sandbox-sample) MLS sold-price stats
 POST /forecast                   -> upload historical data + parameters,
                                      get back a forecast from one or more methods
@@ -26,7 +30,7 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 import requests as http_requests
-from fastapi import FastAPI, UploadFile, File, Query, HTTPException, Header, Depends
+from fastapi import FastAPI, UploadFile, File, Query, HTTPException, Header, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
@@ -34,8 +38,9 @@ from sqlalchemy.orm import Session
 from forecast_engine import run_multi_forecast, AVAILABLE_METHODS, HORIZON_PRESETS
 from data_sources.statcan import fetch_statcan_vector
 from data_sources.statcan_geography import list_geographies, list_housing_types, get_vector_id
+from data_sources import statcan_cache
 from data_sources.repliers import fetch_repliers_price_history, COMMON_PROPERTY_TYPES
-from db import init_db, get_db, Watch
+from db import init_db, get_db, SessionLocal, Watch
 from notify import send_alert_email, build_alert_message
 
 app = FastAPI(title="Canada Housing Price Tracker API")
@@ -114,8 +119,13 @@ def statcan_vector(
 
 
 @app.get("/statcan/geographies")
-def statcan_geographies():
+def statcan_geographies(db: Session = Depends(get_db)):
     """Every location (Canada, provinces, CMAs/cities) StatCan's New Housing Price Index covers."""
+    cached = statcan_cache.get_cached_geographies(db)
+    if cached:
+        return cached
+    # Nothing cached yet (e.g. before the first daily refresh has ever
+    # run) — fall back to a live fetch so the app still works.
     try:
         return list_geographies()
     except http_requests.exceptions.RequestException as e:
@@ -125,8 +135,11 @@ def statcan_geographies():
 
 
 @app.get("/statcan/housing-types")
-def statcan_housing_types():
+def statcan_housing_types(db: Session = Depends(get_db)):
     """The 3 index components StatCan tracks: Total (house and land), House only, Land only."""
+    cached = statcan_cache.get_cached_housing_types(db)
+    if cached:
+        return cached
     try:
         return list_housing_types()
     except http_requests.exceptions.RequestException as e:
@@ -140,8 +153,23 @@ def statcan_price(
     geography: str = Query(..., description="e.g. 'Toronto', 'British Columbia', 'Canada'"),
     housing_type: str = Query("Total (house and land)"),
     periods: int = Query(120, ge=8, le=500),
+    db: Session = Depends(get_db),
 ):
     """Real StatCan New Housing Price Index series, looked up by location name (no vector ID needed)."""
+    cached = statcan_cache.find_cached_series(db, geography, housing_type)
+    if cached:
+        return {
+            "vector_id": cached["vector_id"],
+            "geography": cached["geography"],
+            "housing_type": cached["housing_type"],
+            "week_start": cached["week_start"][-periods:],
+            "volume": cached["volume"][-periods:],
+        }
+
+    # Not a cached (curated location, default index) combo — fall back
+    # to a live fetch. This has a short timeout (see statcan_http.py)
+    # so a bad moment for StatCan fails fast and cleanly here rather
+    # than hanging into Render's own gateway timeout.
     try:
         match = get_vector_id(geography, housing_type)
         df = fetch_statcan_vector(match["vector_id"], latest_n=periods)
@@ -322,9 +350,13 @@ def _verify_alerts_secret(x_alerts_secret: str | None = Header(None)):
         raise HTTPException(status_code=401, detail="Invalid or missing X-Alerts-Secret header.")
 
 
-def _current_value_for_watch(w: Watch) -> float:
+def _current_value_for_watch(w: Watch, db: Session) -> float:
     if w.data_source == "statcan":
-        match = get_vector_id(w.geography, w.property_type or "Total (house and land)")
+        housing_type = w.property_type or "Total (house and land)"
+        cached = statcan_cache.find_cached_series(db, w.geography, housing_type)
+        if cached and cached["volume"]:
+            return float(cached["volume"][-1])
+        match = get_vector_id(w.geography, housing_type)
         df = fetch_statcan_vector(match["vector_id"], latest_n=1)
         return float(df["value"].iloc[-1])
     else:
@@ -346,7 +378,7 @@ def run_alerts(db: Session = Depends(get_db)):
     for w in db.query(Watch).filter(Watch.active == True).all():  # noqa: E712
         checked += 1
         try:
-            current_value = _current_value_for_watch(w)
+            current_value = _current_value_for_watch(w, db)
         except Exception as e:
             errors.append({"watch_id": w.id, "error": str(e)})
             continue
@@ -370,3 +402,33 @@ def run_alerts(db: Session = Depends(get_db)):
 
     db.commit()
     return {"checked": checked, "triggered": triggered, "errors": errors}
+
+
+# ---------------------------------------------------------------------
+# StatCan cache refresh — called by a scheduled GitHub Actions job,
+# ahead of /run-alerts (see .github/workflows/refresh-statcan-cache.yml)
+# ---------------------------------------------------------------------
+
+def _run_statcan_cache_refresh():
+    """Runs in the background, after the HTTP response has already
+    been sent — see the endpoint below. Uses its own DB session since
+    the request-scoped one from Depends(get_db) is closed by then."""
+    db = SessionLocal()
+    try:
+        summary = statcan_cache.refresh_all(db)
+        print(f"[statcan cache refresh] {summary}")
+    finally:
+        db.close()
+
+
+@app.post("/statcan/refresh-cache", dependencies=[Depends(_verify_alerts_secret)])
+def refresh_statcan_cache(background_tasks: BackgroundTasks):
+    """
+    Kicks off a refresh of the StatCan data cache (metadata + curated
+    major locations) in the background and returns immediately — the
+    actual work can take a few minutes (dozens of live StatCan calls),
+    which is fine here since nothing is waiting on this response.
+    Progress/results are printed to the backend's logs.
+    """
+    background_tasks.add_task(_run_statcan_cache_refresh)
+    return {"status": "refresh started in background — check backend logs for the summary"}

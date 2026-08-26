@@ -50,9 +50,16 @@ def _safe_get_json(path: str, params: dict | None = None, error_label: str = "ba
         try:
             detail = e.response.json().get("detail", str(e)) if e.response is not None else str(e)
         except ValueError:
-            # The error body wasn't JSON at all (e.g. a raw "502 Bad
-            # Gateway" page from Render's own proxy, not from our app).
-            detail = f"{e} — response body: {e.response.text[:300] if e.response is not None else ''}"
+            # The error body wasn't JSON at all — Render's own proxy
+            # (not our app) served a raw HTML error page, usually
+            # because the backend didn't respond in time. Give a plain
+            # explanation instead of dumping HTML at the user.
+            status = e.response.status_code if e.response is not None else "?"
+            detail = (
+                f"{error_label} didn't respond in time (HTTP {status} from the "
+                "server hosting the backend, not from Statistics Canada itself). "
+                "This is usually temporary — try again in a moment."
+            )
         return None, detail
     except requests.exceptions.RequestException as e:
         return None, f"Couldn't reach {error_label}: {e}"
