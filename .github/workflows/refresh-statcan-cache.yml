@@ -45,3 +45,18 @@ jobs:
             echo "The backend returned an error."
             exit 1
           fi
+
+          echo "BASE_URL=$(echo "$REFRESH_URL" | sed 's#/statcan/refresh-cache$##')" >> "$GITHUB_ENV"
+
+      - name: Wait for the background refresh, then check what got cached
+        run: |
+          # The refresh above runs in the background on Render and can take
+          # a few minutes (dozens of live StatCan calls). Wait, then hit the
+          # public (no-secret-needed) /statcan/geographies endpoint — if
+          # it's non-empty, the cache actually got populated.
+          sleep 120
+          http_code=$(curl -sS -o geographies.json -w "%{http_code}" "$BASE_URL/statcan/geographies" --max-time 30)
+          echo "GET /statcan/geographies -> HTTP $http_code"
+          echo "Response (first 2000 chars):"
+          head -c 2000 geographies.json
+          echo
