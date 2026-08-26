@@ -17,13 +17,18 @@ is sold commercially (CREA/MLS boards, Repliers, etc.). So this app
 combines two data sources, both wired up and both labeled honestly in
 the app itself:
 
-- **Statistics Canada's New Housing Price Index (NHPI)** — real,
-  free, government data, updated monthly, covering ~30 major
-  cities/regions plus provinces and Canada overall. The catch: it
-  tracks what *builders* charge for *new* houses, not resale/MLS
-  averages, and it only splits into "Total (house and land)", "House
-  only", and "Land only" — not condo vs. detached vs. townhouse. This
-  is the **real backbone** of the app.
+- **Statistics Canada's New Housing Price Index (NHPI)** — real, free,
+  government data, updated monthly. Two catches: it tracks what
+  *builders* charge for *new* houses, not resale/MLS averages, and it
+  only splits into "Total (house and land)", "House only", and "Land
+  only" — not condo vs. detached vs. townhouse. It also only breaks
+  down to **Canada + a few provinces/regions** — StatCan doesn't
+  publish a separate series per city within this table, so there's no
+  "Toronto" or "Vancouver" option here (see
+  `backend/data_sources/statcan_cache.py` for the exact list, and why
+  it's a hardcoded set rather than looked up dynamically — StatCan's
+  metadata-lookup API proved too unreliable to call live). This is the
+  **real backbone** of the app.
 - **Repliers MLS API** — real per-property-type, per-city sold-price
   data (condo, detached, townhouse, etc.) *if* you pay for a
   production API key. On the **free/sandbox key** it returns

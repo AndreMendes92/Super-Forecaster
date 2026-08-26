@@ -4,7 +4,7 @@ main.py — the web API
 GET  /methods                  -> lists available forecasting methods
 GET  /dummy-data                -> fake historical data (for testing)
 GET  /statcan/vector/{id}       -> real time series from Statistics Canada, by raw vector ID
-GET  /statcan/geographies       -> every location StatCan's housing index covers
+GET  /statcan/geographies       -> Canada + curated provinces/regions (see statcan_cache.py)
 GET  /statcan/housing-types     -> the 3 index components StatCan tracks
 GET  /statcan/price             -> real StatCan housing index series, by location name
 POST /statcan/refresh-cache     -> (secret-protected) refreshes the StatCan data
@@ -37,7 +37,7 @@ from sqlalchemy.orm import Session
 
 from forecast_engine import run_multi_forecast, AVAILABLE_METHODS, HORIZON_PRESETS
 from data_sources.statcan import fetch_statcan_vector
-from data_sources.statcan_geography import list_geographies, list_housing_types, get_vector_id
+from data_sources.statcan_geography import get_vector_id
 from data_sources import statcan_cache
 from data_sources.repliers import fetch_repliers_price_history, COMMON_PROPERTY_TYPES
 from db import init_db, get_db, SessionLocal, Watch
@@ -120,37 +120,26 @@ def statcan_vector(
 
 @app.get("/statcan/geographies")
 def statcan_geographies(db: Session = Depends(get_db)):
-    """Every location (Canada, provinces, CMAs/cities) StatCan's New Housing Price Index covers."""
-    cached = statcan_cache.get_cached_geographies(db)
-    if cached:
-        return cached
-    # Nothing cached yet (e.g. before the first daily refresh has ever
-    # run) — fall back to a live fetch so the app still works.
-    try:
-        return list_geographies()
-    except http_requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=502, detail=f"Could not reach Statistics Canada's API: {e}")
-    except ValueError as e:
-        raise HTTPException(status_code=502, detail=str(e))
+    """
+    Locations StatCan's New Housing Price Index reliably covers in
+    this app: Canada + a curated set of provinces/regions, by
+    hardcoded vector ID (see data_sources/statcan_cache.py for why —
+    short version: the live metadata lookup needed to support
+    arbitrary location names has proven unreliable to call from
+    Render, but this fixed set works every time).
+    """
+    return statcan_cache.get_cached_geographies(db)
 
 
 @app.get("/statcan/housing-types")
 def statcan_housing_types(db: Session = Depends(get_db)):
     """The 3 index components StatCan tracks: Total (house and land), House only, Land only."""
-    cached = statcan_cache.get_cached_housing_types(db)
-    if cached:
-        return cached
-    try:
-        return list_housing_types()
-    except http_requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=502, detail=f"Could not reach Statistics Canada's API: {e}")
-    except ValueError as e:
-        raise HTTPException(status_code=502, detail=str(e))
+    return statcan_cache.get_cached_housing_types(db)
 
 
 @app.get("/statcan/price")
 def statcan_price(
-    geography: str = Query(..., description="e.g. 'Toronto', 'British Columbia', 'Canada'"),
+    geography: str = Query(..., description="e.g. 'Canada', 'Ontario', 'British Columbia', 'Prairie region'"),
     housing_type: str = Query("Total (house and land)"),
     periods: int = Query(120, ge=8, le=500),
     db: Session = Depends(get_db),

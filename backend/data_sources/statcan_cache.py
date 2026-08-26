@@ -4,21 +4,38 @@ statcan_cache.py
 Reads/writes the StatcanCache table (db.py) and drives the daily
 background refresh.
 
-Why this exists: StatCan's WDS API is real, free data, but calling it
-live within a web request has proven unreliable (see the long comment
-in statcan_http.py) — intermittent bot-scoring, IPv6 hangs, and plain
-slowness that can lose a race against Render's own gateway timeout and
-come back as an ugly, unhelpful 502 HTML page instead of a clean
-error. This decouples "does the page load fast" from "is StatCan
-cooperating right now" by refreshing a cache once a day in the
-background (see /statcan/refresh-cache in main.py), where slowness and
-retries don't hurt anyone, and having the live endpoints read from
-that cache first.
+Why this exists, and why it's built around hardcoded vector IDs:
 
-Anything not covered by the cache (an uncurated geography, or a
-non-default index type) still falls back to a live fetch — just with
-a short timeout so a bad moment for StatCan fails fast and cleanly
-instead of hanging.
+StatCan's New Housing Price Index (table 18-10-0205-01) is fetched via
+three possible WDS API calls:
+  1. getCubeMetadata                 — lists every Geography/type value
+  2. getSeriesInfoFromCubePidCoord   — turns a chosen combo into a vector ID
+  3. getDataFromVectorsAndLatestNPeriods — fetches the actual numbers for
+     a vector ID you already know
+
+Verified directly against the live Render deployment: calls 1 and 2
+are unreliable — they've failed with a 406 or a connection timeout on
+every attempt, from multiple distinct fixes (browser headers, TLS
+fingerprint impersonation, forcing IPv4). Call 3, when given a vector
+ID you already have, works fine and returns real data quickly.
+
+So instead of resolving geography names to vector IDs dynamically
+(which needs calls 1+2), CURATED_VECTORS below hardcodes the vector ID
+for each geography we support, found by hand via StatCan's own table
+page (Add/Remove data -> Customize layout -> tick "Display vector
+identifier and coordinate"). Every read in this app then only ever
+needs call 3.
+
+Also worth knowing: this table's Geography dimension only goes down to
+province/region level — StatCan does not publish a separate NHPI
+series per city (no "Toronto" or "Vancouver" row) within this
+particular table. Canada + regions is the real ceiling here, not a
+limitation of this app.
+
+A daily background job (see /statcan/refresh-cache in main.py) still
+refreshes the actual index VALUES for each vector — those genuinely
+change over time — it just never needs the unreliable metadata calls
+to do it.
 """
 
 import json
@@ -27,25 +44,24 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from db import StatcanCache
-from . import statcan_geography
 from .statcan import fetch_statcan_vector
 
-# Canada + every province + the major CMAs — covers the large majority
-# of what people will actually look up. Anything outside this list
-# still works, just via a live (short-timeout) fetch instead of cache.
-CURATED_GEOGRAPHIES = [
-    "Canada",
-    "Newfoundland and Labrador", "Prince Edward Island", "Nova Scotia",
-    "New Brunswick", "Quebec", "Ontario", "Manitoba", "Saskatchewan",
-    "Alberta", "British Columbia",
-    "St. John's", "Halifax", "Moncton", "Saint John",
-    "Québec", "Montréal", "Sherbrooke", "Trois-Rivières", "Gatineau",
-    "Ottawa", "Toronto", "Hamilton", "Kitchener", "London", "Windsor", "Barrie",
-    "Winnipeg", "Regina", "Saskatoon",
-    "Calgary", "Edmonton",
-    "Kelowna", "Vancouver", "Victoria",
-]
+# Vector IDs verified by hand against StatCan's own table page — see
+# the module docstring. Add more any time the same way: open
+# https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1810020501,
+# Add/Remove data -> Customize layout -> tick "Display vector
+# identifier and coordinate", and read off the "Total (house and
+# land)" row's vector number for whichever geography you want to add.
+CURATED_VECTORS: dict[str, int] = {
+    "Canada": 111955442,
+    "Ontario": 111955490,
+    "Prairie region": 111955523,
+    "British Columbia": 111955550,
+}
 
+# Static — this table has exactly these 3 index components and that
+# essentially never changes, so there's no reason to fetch it live.
+HOUSING_TYPES = ["Total (house and land)", "House only", "Land only"]
 DEFAULT_HOUSING_TYPE = "Total (house and land)"
 
 
@@ -65,12 +81,21 @@ def _set(db: Session, key: str, value) -> None:
     db.commit()
 
 
+def static_geographies() -> list[dict]:
+    """The geographies this app actually supports reliably — no live call needed."""
+    return [{"member_id": vector_id, "name": name} for name, vector_id in CURATED_VECTORS.items()]
+
+
+def static_housing_types() -> list[dict]:
+    return [{"member_id": i, "name": name} for i, name in enumerate(HOUSING_TYPES)]
+
+
 def get_cached_geographies(db: Session):
-    return _get(db, "geographies")
+    return _get(db, "geographies") or static_geographies()
 
 
 def get_cached_housing_types(db: Session):
-    return _get(db, "housing_types")
+    return _get(db, "housing_types") or static_housing_types()
 
 
 def _series_key(geography: str, housing_type: str) -> str:
@@ -79,13 +104,14 @@ def _series_key(geography: str, housing_type: str) -> str:
 
 def find_cached_series(db: Session, geography_query: str, housing_type_query: str):
     """
-    Best-effort cache lookup for the common case: a curated major
-    geography + the default 'Total (house and land)' index. Anything
-    else returns None so the caller falls back to a live fetch.
+    Matches a typed geography + housing type against the curated
+    (hardcoded-vector) set and returns the cached series if found.
+    Returns None for anything outside that set, so the caller falls
+    back to a (best-effort, less reliable) live metadata-based lookup.
     """
     query_lower = geography_query.strip().lower()
     matched_geo = next(
-        (name for name in CURATED_GEOGRAPHIES
+        (name for name in CURATED_VECTORS
          if name.lower() == query_lower or name.lower().startswith(query_lower)),
         None,
     )
@@ -105,39 +131,33 @@ def cache_series(db: Session, geography: str, housing_type: str, series: dict) -
 
 def refresh_all(db: Session) -> dict:
     """
-    Fetches fresh metadata + the curated geography list from StatCan
-    live, and stores it all in the cache. Meant to run in the
-    background, triggered daily — it's fine for this to take a few
-    minutes (dozens of live StatCan calls), nothing is waiting on it.
+    Fetches fresh data for every curated vector and stores it in the
+    cache. Meant to run in the background, triggered daily. Unlike the
+    original version of this function, this never calls the
+    unreliable metadata endpoints — every fetch here is the one WDS
+    call (getDataFromVectorsAndLatestNPeriods) that's actually held up
+    reliably.
 
     Returns a summary dict, logged by the caller.
     """
-    summary = {"geographies": False, "housing_types": False, "series_ok": [], "series_failed": []}
+    # Geographies/housing types are static now — seed them straight
+    # from the hardcoded lists rather than a live call.
+    _set(db, "geographies", static_geographies())
+    _set(db, "housing_types", static_housing_types())
 
-    try:
-        _set(db, "geographies", statcan_geography.list_geographies())
-        summary["geographies"] = True
-    except Exception as e:
-        summary["geographies_error"] = str(e)
+    summary = {"series_ok": [], "series_failed": []}
 
-    try:
-        _set(db, "housing_types", statcan_geography.list_housing_types())
-        summary["housing_types"] = True
-    except Exception as e:
-        summary["housing_types_error"] = str(e)
-
-    for geography in CURATED_GEOGRAPHIES:
+    for geography, vector_id in CURATED_VECTORS.items():
         try:
-            match = statcan_geography.get_vector_id(geography, DEFAULT_HOUSING_TYPE)
-            df = fetch_statcan_vector(match["vector_id"], latest_n=120)
+            df = fetch_statcan_vector(vector_id, latest_n=120)
             series = {
-                "vector_id": match["vector_id"],
-                "geography": match["geography"],
-                "housing_type": match["housing_type"],
+                "vector_id": vector_id,
+                "geography": geography,
+                "housing_type": DEFAULT_HOUSING_TYPE,
                 "week_start": [d.strftime("%Y-%m-%d") for d in df["period_start"]],
                 "volume": df["value"].tolist(),
             }
-            cache_series(db, match["geography"], match["housing_type"], series)
+            cache_series(db, geography, DEFAULT_HOUSING_TYPE, series)
             summary["series_ok"].append(geography)
         except Exception as e:
             summary["series_failed"].append({"geography": geography, "error": str(e)})
