@@ -33,27 +33,11 @@ integration (sample data on a free key).
 """
 
 import time
-import requests
+
+from .statcan_http import post_json
 
 WDS_BASE = "https://www150.statcan.gc.ca/t1/wds/rest"
 NHPI_PRODUCT_ID = 1810020501  # table 18-10-0205-01, "New housing price index, monthly"
-
-_HEADERS = {
-    "Content-Type": "application/json",
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-CA,en;q=0.9",
-    # StatCan's edge rejects requests that look scripted (a plain
-    # requests/urllib3 User-Agent, no Referer/Origin) with a 406 even
-    # though the request itself is well-formed — a fuller,
-    # browser-shaped header set gets through. If StatCan changes their
-    # bot-filtering again, this will need revisiting.
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Referer": "https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1810020501",
-    "Origin": "https://www150.statcan.gc.ca",
-}
 
 _CACHE_TTL_SECONDS = 6 * 60 * 60  # 6 hours — this metadata is effectively static
 _cache = {"metadata": None, "fetched_at": 0.0}
@@ -64,14 +48,7 @@ def _fetch_cube_metadata() -> dict:
     if _cache["metadata"] is not None and (now - _cache["fetched_at"]) < _CACHE_TTL_SECONDS:
         return _cache["metadata"]
 
-    resp = requests.post(
-        f"{WDS_BASE}/getCubeMetadata",
-        json=[{"productId": NHPI_PRODUCT_ID}],
-        headers=_HEADERS,
-        timeout=30,
-    )
-    resp.raise_for_status()
-    data = resp.json()
+    data = post_json(f"{WDS_BASE}/getCubeMetadata", [{"productId": NHPI_PRODUCT_ID}])
     if not data or data[0].get("status") != "SUCCESS":
         raise ValueError("Could not load Statistics Canada's table metadata (getCubeMetadata failed).")
 
@@ -141,14 +118,10 @@ def get_vector_id(geography: str, housing_type: str = "Total (house and land)") 
                  type_dim["dimensionPositionId"]: type_member["memberId"]}
     coordinate = ".".join(str(positions.get(pos, 0)) for pos in range(1, 11))
 
-    resp = requests.post(
+    data = post_json(
         f"{WDS_BASE}/getSeriesInfoFromCubePidCoord",
-        json=[{"productId": NHPI_PRODUCT_ID, "coordinate": coordinate}],
-        headers=_HEADERS,
-        timeout=30,
+        [{"productId": NHPI_PRODUCT_ID, "coordinate": coordinate}],
     )
-    resp.raise_for_status()
-    data = resp.json()
     if not data or data[0].get("status") != "SUCCESS":
         raise ValueError(
             f"StatCan doesn't have a series for '{geo_member['name']}' x "
