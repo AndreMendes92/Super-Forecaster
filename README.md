@@ -45,9 +45,9 @@ moving average) shown side by side so you can see how much they agree.
 |---|---|---|
 | **Backend** | Pulls housing data, runs forecasts, stores your alerts, sends alert emails | [Render](https://render.com) (Free web service) |
 | **Frontend** | The web page you actually use | [Streamlit Community Cloud](https://streamlit.io/cloud) |
-| **Database** | Stores your saved price alerts so they survive restarts | [Supabase](https://supabase.com) (Free Postgres) |
+| **Database** | Stores your saved price alerts + a daily-refreshed cache of StatCan data | [Supabase](https://supabase.com) (Free Postgres) |
 | **Email** | Sends the "your price target was hit" email | Your free Gmail account |
-| **Daily scheduler** | Triggers the price check once a day | GitHub Actions (free for public repos) |
+| **Daily scheduler** | Refreshes the StatCan cache, then checks every alert | GitHub Actions (free for public repos) |
 
 Nothing here needs a credit card.
 
@@ -148,8 +148,18 @@ there too — same panel, different door in.
 1. In this GitHub repo: **Settings → Secrets and variables → Actions → New repository secret**, add:
    - `ALERTS_URL` = your backend URL + `/run-alerts`, e.g. `https://housing-tracker-backend.onrender.com/run-alerts`
    - `ALERTS_SECRET` = the exact same random string you set on Render in step 3
-2. That's it — `.github/workflows/daily-alerts.yml` will run automatically every day at 13:00 UTC and email anyone whose saved alert has hit its target.
-3. To test it right now instead of waiting: go to the **Actions** tab → **Daily price alert check** → **Run workflow**.
+2. That's it — two workflows now run automatically every day using
+   those same two secrets:
+   - `.github/workflows/refresh-statcan-cache.yml` (12:00 UTC) refreshes
+     a cache of real StatCan data in the background, so the app doesn't
+     depend on StatCan's API being reachable and fast at the exact
+     moment someone opens the page — StatCan's API has turned out to be
+     real but flaky to call live (see the comments in
+     `backend/data_sources/statcan_http.py` if you're curious why).
+   - `.github/workflows/daily-alerts.yml` (13:00 UTC, an hour later)
+     checks every saved alert and emails anyone whose target was hit.
+3. To test either one right now instead of waiting: go to the **Actions**
+   tab → pick the workflow → **Run workflow**.
 
 ### 6. Try it out
 

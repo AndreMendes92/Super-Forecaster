@@ -1,0 +1,47 @@
+name: Refresh StatCan data cache
+
+# Runs once a day, ahead of the alert check, and asks the backend to
+# refresh its cache of StatCan housing data in the background. Live
+# calls to StatCan are unreliable to make synchronously within a web
+# request (see backend/data_sources/statcan_http.py) — this keeps the
+# actual page loads fast and reliable by doing that work here instead,
+# on a schedule with no user waiting on it.
+#
+# No extra setup needed beyond what daily-alerts.yml already requires:
+# this reuses the same ALERTS_URL / ALERTS_SECRET repo secrets, just
+# swapping the endpoint path.
+
+on:
+  schedule:
+    - cron: "0 12 * * *"  # 12:00 UTC daily — an hour ahead of the alert check
+  workflow_dispatch: {}
+
+jobs:
+  refresh-cache:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call the backend's /statcan/refresh-cache endpoint
+        run: |
+          if [ -z "${{ secrets.ALERTS_URL }}" ] || [ -z "${{ secrets.ALERTS_SECRET }}" ]; then
+            echo "ALERTS_URL and/or ALERTS_SECRET repo secrets are not set yet — see README.md."
+            exit 1
+          fi
+
+          REFRESH_URL="$(echo "${{ secrets.ALERTS_URL }}" | sed 's#/run-alerts$#/statcan/refresh-cache#')"
+
+          # Render's free tier sleeps the backend after ~15 min idle, so the
+          # first request of the day can take up to a minute to wake it up.
+          # The endpoint itself responds immediately (the actual refresh
+          # runs in the background), so this doesn't need a long timeout.
+          http_code=$(curl -sS -o response.json -w "%{http_code}" -X POST "$REFRESH_URL" \
+            -H "X-Alerts-Secret: ${{ secrets.ALERTS_SECRET }}" \
+            --max-time 90)
+
+          echo "HTTP status: $http_code"
+          cat response.json
+          echo
+
+          if [ "$http_code" -ge 400 ]; then
+            echo "The backend returned an error."
+            exit 1
+          fi

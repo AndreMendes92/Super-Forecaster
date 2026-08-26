@@ -18,7 +18,7 @@ persistent alerts, set DATABASE_URL to a real Postgres database
 import os
 from datetime import datetime, timezone
 
-from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, DateTime
+from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, DateTime, Text
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./watches.db")
@@ -58,6 +58,28 @@ class Watch(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     last_notified_at = Column(DateTime, nullable=True)
     last_checked_value = Column(Float, nullable=True)
+
+
+class StatcanCache(Base):
+    """
+    A small key/value cache of StatCan data, refreshed by a daily
+    background job (see /statcan/refresh-cache) instead of being
+    fetched live on every user request. StatCan's API is real but
+    unreliable to call synchronously within a web request (see the
+    long comment in data_sources/statcan_http.py) — this table is what
+    lets the actual page loads be fast and reliable regardless.
+
+    key examples:
+      "geographies"                        -> list of {member_id, name}
+      "housing_types"                      -> list of {member_id, name}
+      "series:<geography>:<housing_type>"  -> {"vector_id", "week_start": [...], "volume": [...]}
+    """
+
+    __tablename__ = "statcan_cache"
+
+    key = Column(String, primary_key=True)
+    value_json = Column(Text, nullable=False)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
 def init_db():
