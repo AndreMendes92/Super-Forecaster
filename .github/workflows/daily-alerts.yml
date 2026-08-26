@@ -1,0 +1,46 @@
+name: Daily price alert check
+
+# Runs once a day and asks the backend to check every saved alert
+# against the latest prices, emailing any that have hit their target.
+#
+# Setup (see README.md for full details):
+#   1. Deploy the backend (Render) and set ALERTS_SECRET as an
+#      environment variable on it — any long random string you choose.
+#   2. In this repo: Settings -> Secrets and variables -> Actions, add:
+#        ALERTS_URL     e.g. https://your-backend.onrender.com/run-alerts
+#        ALERTS_SECRET  the same value you set on Render
+#   3. That's it — this workflow runs automatically every day.
+#
+# You can also trigger it manually any time from the Actions tab
+# ("Run workflow" button) to test it without waiting for the schedule.
+
+on:
+  schedule:
+    - cron: "0 13 * * *"  # 13:00 UTC daily (~9am Eastern / 6am Pacific)
+  workflow_dispatch: {}
+
+jobs:
+  run-alerts:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call the backend's /run-alerts endpoint
+        run: |
+          if [ -z "${{ secrets.ALERTS_URL }}" ] || [ -z "${{ secrets.ALERTS_SECRET }}" ]; then
+            echo "ALERTS_URL and/or ALERTS_SECRET repo secrets are not set yet — see README.md."
+            exit 1
+          fi
+
+          # Render's free tier sleeps the backend after ~15 min idle, so the
+          # first request of the day can take up to a minute to wake it up.
+          http_code=$(curl -sS -o response.json -w "%{http_code}" -X POST "${{ secrets.ALERTS_URL }}" \
+            -H "X-Alerts-Secret: ${{ secrets.ALERTS_SECRET }}" \
+            --max-time 90)
+
+          echo "HTTP status: $http_code"
+          cat response.json
+          echo
+
+          if [ "$http_code" -ge 400 ]; then
+            echo "The backend returned an error."
+            exit 1
+          fi
