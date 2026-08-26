@@ -74,7 +74,7 @@ jobs:
           head -c 2000 geographies.json
           echo
 
-          http_code=$(curl -sS -o price.json -w "%{http_code}" "$BASE_URL/statcan/price?geography=Canada&periods=6" --max-time 30)
+          http_code=$(curl -sS -o price.json -w "%{http_code}" "$BASE_URL/statcan/price?geography=Canada&periods=8" --max-time 30)
           echo "GET /statcan/price?geography=Canada -> HTTP $http_code"
           cat price.json
           echo
