@@ -3,9 +3,10 @@ name: Refresh StatCan data cache
 # Runs once a day, ahead of the alert check, and asks the backend to
 # refresh its cache of StatCan housing data in the background. Live
 # calls to StatCan are unreliable to make synchronously within a web
-# request (see backend/data_sources/statcan_http.py) — this keeps the
-# actual page loads fast and reliable by doing that work here instead,
-# on a schedule with no user waiting on it.
+# request (see backend/data_sources/statcan_http.py and
+# backend/data_sources/statcan_cache.py) — this keeps the actual page
+# loads fast and reliable by doing that work here instead, on a
+# schedule with no user waiting on it.
 #
 # No extra setup needed beyond what daily-alerts.yml already requires:
 # this reuses the same ALERTS_URL / ALERTS_SECRET repo secrets, just
@@ -48,33 +49,20 @@ jobs:
 
           echo "BASE_URL=$(echo "$REFRESH_URL" | sed 's#/statcan/refresh-cache$##')" >> "$GITHUB_ENV"
 
-      - name: DIAGNOSTIC — test the raw single-call vector endpoint directly
+      - name: Wait for the background refresh, then confirm what got cached
         run: |
-          # /statcan/vector/{id} calls only getDataFromVectorsAndLatestNPeriods
-          # (one StatCan API call, no metadata/coordinate lookup calls first).
-          # 111955442 is a known-good vector: Canada, Total (house and land) NHPI.
-          # This checks whether THIS specific StatCan endpoint is reachable from
-          # Render right now, independent of the cache/metadata calls that have
-          # been timing out.
-          http_code=$(curl -sS -o vector.json -w "%{http_code}" "$BASE_URL/statcan/vector/111955442?periods=12" --max-time 30)
-          echo "GET /statcan/vector/111955442 -> HTTP $http_code"
-          cat vector.json
-          echo
-
-      - name: Wait for the background refresh, then check what got cached
-        run: |
-          # The refresh above runs in the background on Render and can take
-          # a few minutes (dozens of live StatCan calls). Wait, then hit the
-          # public (no-secret-needed) /statcan/geographies endpoint — if
-          # it's non-empty, the cache actually got populated.
-          sleep 120
-          http_code=$(curl -sS -o geographies.json -w "%{http_code}" "$BASE_URL/statcan/geographies" --max-time 30)
-          echo "GET /statcan/geographies -> HTTP $http_code"
-          echo "Response (first 2000 chars):"
-          head -c 2000 geographies.json
-          echo
-
+          # The refresh above runs in the background on Render and takes
+          # about a minute (a handful of live StatCan calls, one per curated
+          # geography). Wait, then confirm the cache actually has real data
+          # by checking a known series — useful in these logs if StatCan
+          # ever starts misbehaving again.
+          sleep 90
           http_code=$(curl -sS -o price.json -w "%{http_code}" "$BASE_URL/statcan/price?geography=Canada&periods=8" --max-time 30)
           echo "GET /statcan/price?geography=Canada -> HTTP $http_code"
           cat price.json
           echo
+
+          if [ "$http_code" -ne 200 ]; then
+            echo "Cache refresh may not have completed successfully — check Render's logs for the [statcan cache refresh] summary line."
+            exit 1
+          fi
