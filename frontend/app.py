@@ -130,10 +130,11 @@ with explore_tab:
             ["Statistics Canada (real data)", "Repliers MLS (condo/detached/etc. by city)"],
             help=(
                 "StatCan's New Housing Price Index is real, free, government data, "
-                "covering major cities — but it tracks NEW-build prices, not resale "
-                "averages, and doesn't split out condos specifically. Repliers gives "
-                "real per-property-type city data, but returns realistic SAMPLE data "
-                "on a free key, not live listings, unless you add a paid key later."
+                "covering Canada and a few provinces/regions — but it tracks NEW-build "
+                "prices, not resale averages, doesn't split out condos specifically, "
+                "and doesn't break down by individual city. Repliers gives real "
+                "per-property-type city data, but returns realistic SAMPLE data on a "
+                "free key, not live listings, unless you add a paid key later."
             ),
         )
 
@@ -266,7 +267,7 @@ with alerts_tab:
         with c3:
             alert_geography = st.text_input(
                 "Location",
-                help="For StatCan: a location name like 'Toronto', 'British Columbia', or 'Canada'. For Repliers: a city name.",
+                help="For StatCan: 'Canada', 'Ontario', 'British Columbia', or 'Prairie region' (this table only breaks down to province/region, not individual cities). For Repliers: a city name.",
             )
         with c4:
             alert_property_type = st.text_input(
