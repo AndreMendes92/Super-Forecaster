@@ -23,6 +23,14 @@ what main.py's error handling already expects.
 import requests
 from curl_cffi import requests as cf_requests
 from curl_cffi.requests import exceptions as cf_exceptions
+from curl_cffi.const import CurlOpt
+
+# Force IPv4. Render's outbound networking doesn't reliably support
+# IPv6 (we hit this exact symptom once already with Supabase's direct
+# connection) — curl can try an IPv6 route first, hang, and only time
+# out after the full timeout window with no response at all, which is
+# indistinguishable from a real network block until you dig in.
+_IPV4_ONLY = {CurlOpt.IPRESOLVE: 1}
 
 _HEADERS = {
     "Content-Type": "application/json",
@@ -47,6 +55,7 @@ def post_json(url: str, body, timeout: int = 30):
     try:
         resp = cf_requests.post(
             url, json=body, headers=_HEADERS, timeout=timeout, impersonate="chrome124",
+            curl_options=_IPV4_ONLY,
         )
         resp.raise_for_status()
         return resp.json()
