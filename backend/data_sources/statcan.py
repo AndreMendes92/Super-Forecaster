@@ -21,8 +21,9 @@ wide "Total (house and land)" New Housing Price Index, monthly,
 table 18-10-0205-01.
 """
 
-import requests
 import pandas as pd
+
+from .statcan_http import post_json
 
 STATCAN_WDS_URL = "https://www150.statcan.gc.ca/t1/wds/rest/getDataFromVectorsAndLatestNPeriods"
 
@@ -67,22 +68,5 @@ def fetch_statcan_vector(vector_id: int, latest_n: int = 120) -> pd.DataFrame:
     or requests.exceptions.RequestException on network problems.
     """
     body = [{"vectorId": int(vector_id), "latestN": int(latest_n)}]
-    # StatCan's edge rejects requests that look scripted (a plain
-    # requests/urllib3 User-Agent, no Referer/Origin) with a 406 even
-    # though the request itself is well-formed — a fuller,
-    # browser-shaped header set gets through.
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-CA,en;q=0.9",
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Referer": "https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1810020501",
-        "Origin": "https://www150.statcan.gc.ca",
-    }
-    resp = requests.post(STATCAN_WDS_URL, json=body, headers=headers, timeout=30)
-    resp.raise_for_status()
-    data = resp.json()
+    data = post_json(STATCAN_WDS_URL, body)
     return _parse_wds_response(data, vector_id)
