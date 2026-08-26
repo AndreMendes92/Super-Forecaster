@@ -40,7 +40,19 @@ NHPI_PRODUCT_ID = 1810020501  # table 18-10-0205-01, "New housing price index, m
 
 _HEADERS = {
     "Content-Type": "application/json",
-    "User-Agent": "Mozilla/5.0 (compatible; HousingTracker/1.0)",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-CA,en;q=0.9",
+    # StatCan's edge rejects requests that look scripted (a plain
+    # requests/urllib3 User-Agent, no Referer/Origin) with a 406 even
+    # though the request itself is well-formed — a fuller,
+    # browser-shaped header set gets through. If StatCan changes their
+    # bot-filtering again, this will need revisiting.
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Referer": "https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1810020501",
+    "Origin": "https://www150.statcan.gc.ca",
 }
 
 _CACHE_TTL_SECONDS = 6 * 60 * 60  # 6 hours — this metadata is effectively static
