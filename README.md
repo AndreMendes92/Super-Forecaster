@@ -57,11 +57,28 @@ Nothing here needs a credit card.
 
 ### 1. Create a free Supabase database (stores your alerts)
 
+Supabase changes this screen fairly often, so go by what you see rather
+than exact menu names — the important part is which connection string
+to grab.
+
 1. Go to [supabase.com](https://supabase.com) → **Start your project** → sign in with GitHub.
-2. Click **New project**. Pick any name/region, set a database password (save it somewhere).
-3. Once it's created, go to **Project Settings → Database → Connection string**, choose the **URI** tab, and copy it. It looks like:
-   `postgresql://postgres:[YOUR-PASSWORD]@db.xxxxxx.supabase.co:5432/postgres`
-4. Replace `[YOUR-PASSWORD]` in that string with the password you set. Save the final string — you'll paste it into Render in step 3.
+2. Click **New project**. Pick any name/region, set a database password (save it somewhere — you'll need it below).
+3. Once the project's finished setting up, look for a **Connect** button
+   (usually near the top of the project's main page, sometimes with a
+   plug icon) — that's where the connection string lives now, not
+   under Settings. Click it.
+4. That panel offers a few connection types — **don't use "Direct
+   connection."** Pick **Session pooler** instead. Two reasons: Render
+   (where the backend lives) can't reach Supabase's direct-connection
+   address, and the pooler is the option meant for exactly this case
+   (an app hosted elsewhere connecting in).
+5. Copy the **URI** shown under Session pooler. It looks like:
+   `postgresql://postgres.xxxxxxxxxxxx:[YOUR-PASSWORD]@aws-0-<region>.pooler.supabase.com:5432/postgres`
+6. Replace `[YOUR-PASSWORD]` with the database password from step 2. Save the final string — you'll paste it into Render in step 3 below, as `DATABASE_URL`.
+
+If you truly can't find a "Connect" button anywhere: open any table in
+the **Table Editor**, and Supabase shows a "Connect via" shortcut
+there too — same panel, different door in.
 
 ### 2. Create a free Gmail "app password" (sends your alert emails)
 
