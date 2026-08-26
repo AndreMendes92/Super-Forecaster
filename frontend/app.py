@@ -43,11 +43,19 @@ def _get_json(path: str, params: dict | None = None):
 def _safe_get_json(path: str, params: dict | None = None, error_label: str = "backend"):
     try:
         return _get_json(path, params), None
+    except requests.exceptions.HTTPError as e:
+        # HTTPError is a RequestException subclass, so it must be checked
+        # first — otherwise the broader except below always wins and we
+        # lose the specific "detail" message our own backend sent back.
+        try:
+            detail = e.response.json().get("detail", str(e)) if e.response is not None else str(e)
+        except ValueError:
+            # The error body wasn't JSON at all (e.g. a raw "502 Bad
+            # Gateway" page from Render's own proxy, not from our app).
+            detail = f"{e} — response body: {e.response.text[:300] if e.response is not None else ''}"
+        return None, detail
     except requests.exceptions.RequestException as e:
         return None, f"Couldn't reach {error_label}: {e}"
-    except requests.exceptions.HTTPError as e:
-        detail = e.response.json().get("detail", str(e)) if e.response is not None else str(e)
-        return None, detail
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
