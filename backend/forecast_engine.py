@@ -34,6 +34,32 @@ AVAILABLE_METHODS = {
     "moving_average": "Moving Average (simple baseline)",
 }
 
+# Named forecast horizons so the app can talk about "short/medium/long
+# term" instead of making people guess a raw number of periods.
+# Counts are in *periods* of whatever freq is in use (months for "M",
+# weeks for "W") — e.g. medium = 12 months for monthly StatCan data,
+# but 12 weeks (~3 months) for weekly data.
+HORIZON_PRESETS = {
+    "short": 3,
+    "medium": 12,
+    "long": 36,
+}
+
+MAX_PERIODS_AHEAD = 60
+
+
+def resolve_horizon(horizon) -> int:
+    """Accepts either a preset name ('short'/'medium'/'long') or an int
+    number of periods, and returns a validated period count."""
+    if isinstance(horizon, str):
+        if horizon not in HORIZON_PRESETS:
+            raise ValueError(f"horizon must be one of {list(HORIZON_PRESETS)} or an integer")
+        return HORIZON_PRESETS[horizon]
+    periods = int(horizon)
+    if not 1 <= periods <= MAX_PERIODS_AHEAD:
+        raise ValueError(f"periods_ahead must be between 1 and {MAX_PERIODS_AHEAD}")
+    return periods
+
 # How each supported data frequency maps to seasonal cycle length and
 # date-stepping behaviour.
 FREQ_INFO = {
@@ -166,9 +192,11 @@ def run_multi_forecast(
     """
     Runs one or more forecasting methods on the same historical data.
 
-    weeks_ahead: how many periods ahead to forecast (1-12). Named
-    weeks_ahead for backward compatibility, but represents "periods"
-    generically — weeks if freq="W", months if freq="M".
+    weeks_ahead: how many periods ahead to forecast. Accepts either an
+    int (1-60) or a horizon preset name ("short"/"medium"/"long" — see
+    HORIZON_PRESETS). Named weeks_ahead for backward compatibility,
+    but represents "periods" generically — weeks if freq="W", months
+    if freq="M".
     freq: "W" (weekly, default) or "M" (monthly — use for most
     real-world public datasets, which are usually monthly).
 
@@ -178,12 +206,11 @@ def run_multi_forecast(
         methods = ["holt_winters"]
     if freq not in FREQ_INFO:
         raise ValueError(f"freq must be one of {list(FREQ_INFO)}")
+    weeks_ahead = resolve_horizon(weeks_ahead)
 
     unknown = [m for m in methods if m not in AVAILABLE_METHODS]
     known = [m for m in methods if m in AVAILABLE_METHODS]
 
-    if not 1 <= weeks_ahead <= 12:
-        raise ValueError("weeks_ahead must be between 1 and 12")
     if not known:
         raise ValueError(f"No valid methods given. Available: {list(AVAILABLE_METHODS)}")
 

@@ -5,3 +5,6 @@ statsmodels
 python-multipart
 numpy
 requests
+sqlalchemy
+psycopg2-binary
+pydantic[email]
