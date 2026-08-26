@@ -48,6 +48,19 @@ jobs:
 
           echo "BASE_URL=$(echo "$REFRESH_URL" | sed 's#/statcan/refresh-cache$##')" >> "$GITHUB_ENV"
 
+      - name: DIAGNOSTIC — test the raw single-call vector endpoint directly
+        run: |
+          # /statcan/vector/{id} calls only getDataFromVectorsAndLatestNPeriods
+          # (one StatCan API call, no metadata/coordinate lookup calls first).
+          # 111955442 is a known-good vector: Canada, Total (house and land) NHPI.
+          # This checks whether THIS specific StatCan endpoint is reachable from
+          # Render right now, independent of the cache/metadata calls that have
+          # been timing out.
+          http_code=$(curl -sS -o vector.json -w "%{http_code}" "$BASE_URL/statcan/vector/111955442?periods=12" --max-time 30)
+          echo "GET /statcan/vector/111955442 -> HTTP $http_code"
+          cat vector.json
+          echo
+
       - name: Wait for the background refresh, then check what got cached
         run: |
           # The refresh above runs in the background on Render and can take
