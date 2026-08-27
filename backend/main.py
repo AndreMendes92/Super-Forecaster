@@ -15,6 +15,8 @@ GET  /livability/municipalities -> the 22 curated Metro Vancouver municipalities
 GET  /livability/places         -> cached "Best Places to Live" criteria (crime,
                                      population density, rent, walkability, transit,
                                      green space, income) for every municipality
+GET  /livability/boundaries     -> {municipality_id: GeoJSON geometry}, for the
+                                     heat map
 POST /livability/refresh-cache  -> (secret-protected) refreshes the livability
                                      cache in the background. Meant to be called
                                      monthly by a GitHub Actions cron job.
@@ -453,6 +455,17 @@ def livability_places(db: Session = Depends(get_db)):
         "places": livability_cache.get_cached_places(db),
         "meta": livability_cache.get_cache_meta(db),
     }
+
+
+@app.get("/livability/boundaries")
+def livability_boundaries(db: Session = Depends(get_db)):
+    """
+    {municipality_id: GeoJSON geometry} for the heat map — fetched
+    once ever per municipality (boundaries don't change), so this
+    fills in gradually over the first few refreshes rather than all at
+    once (see livability_boundaries.py and livability_cache.py).
+    """
+    return livability_cache.get_cached_boundaries(db)
 
 
 def _run_livability_cache_refresh():
