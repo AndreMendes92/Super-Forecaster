@@ -42,6 +42,45 @@ generated from whichever series you're looking at, using a few
 different statistical methods (Holt-Winters, ARIMA, linear trend,
 moving average) shown side by side so you can see how much they agree.
 
+A third tab, **🏘️ Best Places to Live**, is a separate tool in the same
+app: it ranks the 21 Metro Vancouver municipalities + Electoral Area A
+against each other on safety, affordability, walkability, transit
+access, green space, population density, and household income, with
+sliders to weight what matters to you. See the dedicated section below
+for exactly what each of those criteria measures (and doesn't).
+
+---
+
+## 🏘️ Best Places to Live (Metro Vancouver) — what it measures
+
+Scored at the **municipality** level (Vancouver, Burnaby, Surrey,
+Richmond, etc.) — the coarsest granularity, but the only one where
+every criterion below has real, free, region-wide data. Every number
+is free public data, no API key or signup required:
+
+| Criterion | Source | What it actually measures |
+|---|---|---|
+| Safety | Statistics Canada, Crime Severity Index by police service (table 35-10-0063-01) | Lower = safer. A few municipalities share one police service (e.g. Maple Ridge + Pitt Meadows both under Ridge Meadows RCMP) and get the same value — noted in the detail view. A handful of smaller municipalities don't have a confidently-mapped police service yet and show "not available" rather than a guessed number (see `backend/data_sources/livability_geography.py`). |
+| Affordability | CMHC Rental Market Survey data tables | **Average rent, not resale/purchase price** — no free, structured, per-municipality source of resale housing prices exists (same gap as the NHPI section above). This is, by a wide margin, this tab's shakiest data source — see `backend/data_sources/livability_cmhc.py`. |
+| Walkability | OpenStreetMap (Overpass API) | Density of grocery stores, restaurants, cafes, and pharmacies. An **amenity-density proxy**, explicitly not a real Walk Score (which would require a paid or signup API key, out of scope for this free-only build). |
+| Transit access | OpenStreetMap (Overpass API) | Density of bus stops, transit platforms, and rail stations. |
+| Green space | OpenStreetMap (Overpass API) | Density of parks, gardens, and nature reserves. |
+| Population density | Statistics Canada, 2021 Census (table 98-10-0002-01) | People per km². Shown, but **not counted in the ranking by default** — "denser is better" is a matter of taste, not something to score objectively. Turn its weight up and pick a direction if you disagree. |
+| Household income | Statistics Canada, 2021 Census (table 98-10-0057-01) | Median household income, shown as context next to rent — also not counted by default. |
+
+**Honest caveat about this tab specifically**: unlike the housing-price
+tracker above (whose StatCan integration has been live-verified against
+a real deployment), the "Best Places to Live" data sources were wired
+up in an environment with no live network access to StatCan, CMHC, or
+OpenStreetMap — so treat the very first `POST /livability/refresh-cache`
+after deploying as a verification step, not a given. Check its response
+summary (also printed to Render's logs) for `sources_failed` or
+`municipalities_osm_failed` entries, and fix from there — the same
+process this repo's own StatCan integration went through before it was
+solid. Weighting/ranking math itself is fully tested (see the "Compute
+rankings" logic in `frontend/app.py`) — it's specifically the raw data
+fetches that need that one real-world check.
+
 ---
 
 ## How it's built (so you know what you're setting up)
@@ -153,18 +192,26 @@ there too — same panel, different door in.
 1. In this GitHub repo: **Settings → Secrets and variables → Actions → New repository secret**, add:
    - `ALERTS_URL` = your backend URL + `/run-alerts`, e.g. `https://housing-tracker-backend.onrender.com/run-alerts`
    - `ALERTS_SECRET` = the exact same random string you set on Render in step 3
-2. That's it — two workflows now run automatically every day using
-   those same two secrets:
-   - `.github/workflows/refresh-statcan-cache.yml` (12:00 UTC) refreshes
-     a cache of real StatCan data in the background, so the app doesn't
-     depend on StatCan's API being reachable and fast at the exact
-     moment someone opens the page — StatCan's API has turned out to be
-     real but flaky to call live (see the comments in
+2. That's it — three workflows now run automatically using those same
+   two secrets:
+   - `.github/workflows/refresh-statcan-cache.yml` (12:00 UTC daily)
+     refreshes a cache of real StatCan data in the background, so the
+     app doesn't depend on StatCan's API being reachable and fast at
+     the exact moment someone opens the page — StatCan's API has
+     turned out to be real but flaky to call live (see the comments in
      `backend/data_sources/statcan_http.py` if you're curious why).
-   - `.github/workflows/daily-alerts.yml` (13:00 UTC, an hour later)
-     checks every saved alert and emails anyone whose target was hit.
-3. To test either one right now instead of waiting: go to the **Actions**
-   tab → pick the workflow → **Run workflow**.
+   - `.github/workflows/daily-alerts.yml` (13:00 UTC daily, an hour
+     later) checks every saved alert and emails anyone whose target
+     was hit.
+   - `.github/workflows/refresh-livability-cache.yml` (12:00 UTC on
+     the 1st of each month) refreshes the **🏘️ Best Places to Live**
+     tab's data — monthly, not daily, since census/crime/rent data
+     doesn't change nearly as often as housing prices do.
+3. To test any of these right now instead of waiting: go to the
+   **Actions** tab → pick the workflow → **Run workflow**. Do this once
+   for `refresh-livability-cache.yml` after your first deploy —
+   see the caveat above about this tab's data sources needing a real
+   first check.
 
 ### 6. Try it out
 
@@ -172,6 +219,7 @@ there too — same panel, different door in.
 2. On **📈 Explore & Forecast**, pick a location and see the real trend + forecast.
 3. On **🔔 My Alerts**, enter your email and save an alert (e.g. Toronto, "below", some target).
 4. Manually run the Actions workflow (step 5.3) once to confirm you get the email.
+5. On **🏘️ Best Places to Live**, adjust a few sliders and confirm the ranking updates — if it says no data is cached yet, go run `refresh-livability-cache.yml` from step 5.3.
 
 ---
 
@@ -210,3 +258,18 @@ uses Supabase for anything you actually want to keep.
   forecast — ask for this as a follow-up if you want it built out.
 - **SMS instead of email**: swap `notify.py` for a free-tier
   Twilio/Telegram integration.
+- **A real Walk Score** on the Best Places to Live tab instead of the
+  OpenStreetMap amenity-density proxy: sign up at
+  [walkscore.com](https://www.walkscore.com/professional/api.php) for
+  a free API key and wire it into `livability_osm.py`.
+- **Finer-than-municipality detail inside Vancouver itself**: the City
+  of Vancouver publishes richer open data broken down into its 22
+  official local areas (Kitsilano, Mount Pleasant, etc.) — none of the
+  other Metro Vancouver municipalities publish anything comparable, so
+  this would only ever cover Vancouver, as an added drill-down rather
+  than a replacement for the region-wide municipality view.
+- **Air quality and school quality** as additional criteria: left out
+  because neither has a clean free per-municipality source — Metro
+  Vancouver's air quality monitoring stations are too sparse to cover
+  every municipality, and there's no free, structured school-ratings
+  dataset.

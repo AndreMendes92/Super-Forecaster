@@ -115,7 +115,92 @@ def _plot_history_and_forecast(history_df: pd.DataFrame, forecasts: dict, y_labe
     st.plotly_chart(fig, width="stretch")
 
 
-explore_tab, alerts_tab = st.tabs(["📈 Explore & Forecast", "🔔 My Alerts"])
+explore_tab, alerts_tab, places_tab = st.tabs(
+    ["📈 Explore & Forecast", "🔔 My Alerts", "🏘️ Best Places to Live"]
+)
+
+# Criteria shown on the "Best Places to Live" tab, in display order.
+# `higher_is_better` is the *default* scoring direction — every
+# criterion except population density has an obvious one (safer/
+# cheaper/more walkable is better), so only that one exposes a
+# direction toggle in the UI. Weight defaults reflect that: density
+# and income start at 0 (shown, but not counted in the ranking) since
+# "denser is better" is a matter of taste and income is context, not
+# a livability criterion on its own.
+LIVABILITY_CRITERIA = [
+    {"key": "crime_severity_index", "label": "Safety (lower crime)", "default_weight": 5, "higher_is_better": False},
+    {"key": "average_rent", "label": "Affordability (lower rent)", "default_weight": 5, "higher_is_better": False},
+    {"key": "walkability", "label": "Walkability (amenity density)", "default_weight": 3, "higher_is_better": True},
+    {"key": "transit", "label": "Transit access", "default_weight": 3, "higher_is_better": True},
+    {"key": "green_space", "label": "Green space access", "default_weight": 2, "higher_is_better": True},
+    {"key": "population_density", "label": "Population density", "default_weight": 0, "higher_is_better": True, "direction_toggle": True},
+    {"key": "median_household_income", "label": "Household income (context)", "default_weight": 0, "higher_is_better": True},
+]
+
+
+def _normalize_criterion(raw_values: dict, higher_is_better: bool) -> dict:
+    """
+    Min-max scales a {municipality_id: value} dict to 0-100, flipped
+    when lower is better. Municipalities with a None value are simply
+    left out of the returned dict (not scored 0) — the composite-score
+    step below treats a missing sub-score as "excluded from this
+    municipality's average", not "penalized".
+    """
+    valid = {k: v for k, v in raw_values.items() if v is not None}
+    if len(valid) < 2:
+        return {k: 50.0 for k in valid}
+    lo, hi = min(valid.values()), max(valid.values())
+    if hi == lo:
+        return {k: 50.0 for k in valid}
+    scaled = {}
+    for k, v in valid.items():
+        pct = (v - lo) / (hi - lo)
+        if not higher_is_better:
+            pct = 1 - pct
+        scaled[k] = pct * 100
+    return scaled
+
+
+def _compute_rankings(places: dict, weights: dict, directions: dict) -> pd.DataFrame:
+    """
+    weights/directions are {criterion_key: value} for every criterion
+    in LIVABILITY_CRITERIA. Returns one row per municipality with its
+    composite score (weighted average of available normalized
+    sub-scores — a criterion with weight 0 or missing data for that
+    municipality is simply excluded from its average, not counted as
+    zero) plus how many of the weighted-on criteria actually had data.
+    """
+    normalized = {
+        key: _normalize_criterion(
+            {pid: p["criteria"].get(key, {}).get("value") for pid, p in places.items()},
+            directions[key],
+        )
+        for key in weights
+    }
+
+    rows = []
+    for pid, p in places.items():
+        weighted_sum, total_weight, n_used, n_weighted = 0.0, 0.0, 0, 0
+        for key, w in weights.items():
+            if w <= 0:
+                continue
+            n_weighted += 1
+            score = normalized[key].get(pid)
+            if score is None:
+                continue
+            weighted_sum += score * w
+            total_weight += w
+            n_used += 1
+        rows.append({
+            "id": pid,
+            "name": p["name"],
+            "composite": (weighted_sum / total_weight) if total_weight > 0 else None,
+            "criteria_used": f"{n_used}/{n_weighted}" if n_weighted else "0/0",
+        })
+
+    df = pd.DataFrame(rows).sort_values("composite", ascending=False, na_position="last").reset_index(drop=True)
+    df.insert(0, "rank", range(1, len(df) + 1))
+    return df
 
 # =======================================================================
 # TAB 1 — Explore & Forecast
@@ -344,3 +429,93 @@ with alerts_tab:
                         st.rerun()
                     except requests.exceptions.RequestException as e:
                         st.error(f"Couldn't delete: {e}")
+
+# =======================================================================
+# TAB 3 — Best Places to Live (Metro Vancouver)
+# =======================================================================
+with places_tab:
+    st.subheader("Compare Metro Vancouver municipalities")
+    st.caption(
+        "Scored across the 21 Metro Vancouver municipalities + Electoral Area A — "
+        "the coarsest granularity, but the only one where every criterion below has "
+        "real, free, region-wide data (see README.md for exactly where each number "
+        "comes from and what it doesn't capture). Adjust the sliders to match what "
+        "you actually care about — the ranking recomputes instantly."
+    )
+
+    data, err = _safe_get_json("/livability/places", error_label="the backend")
+    if err:
+        st.error(err)
+        st.stop()
+
+    places = data.get("places") or {}
+    meta = data.get("meta") or {}
+
+    if not places:
+        st.info(
+            "No livability data cached yet. On first setup, trigger the backend's "
+            "`POST /livability/refresh-cache` once (see README.md) — after that it "
+            "refreshes automatically on a monthly schedule."
+        )
+        st.stop()
+
+    if meta.get("computed_at"):
+        st.caption(f"Data last refreshed: {meta['computed_at']}")
+
+    st.markdown("**How much does each criterion matter to you?**")
+    weight_cols = st.columns(len(LIVABILITY_CRITERIA))
+    weights, directions = {}, {}
+    for col, criterion in zip(weight_cols, LIVABILITY_CRITERIA):
+        key = criterion["key"]
+        with col:
+            weights[key] = st.slider(criterion["label"], 0, 10, criterion["default_weight"], key=f"weight_{key}")
+            if criterion.get("direction_toggle") and weights[key] > 0:
+                directions[key] = st.checkbox("Denser is better", value=True, key=f"dir_{key}")
+            else:
+                directions[key] = criterion["higher_is_better"]
+
+    rankings = _compute_rankings(places, weights, directions)
+
+    if rankings["composite"].isna().all():
+        st.info("Set at least one weight above 0 to see a ranking.")
+    else:
+        st.divider()
+        col_table, col_chart = st.columns([1, 1.2])
+        with col_table:
+            st.markdown("**Ranking**")
+            display_df = rankings.dropna(subset=["composite"]).copy()
+            display_df["composite"] = display_df["composite"].round(1)
+            st.dataframe(
+                display_df[["rank", "name", "composite", "criteria_used"]].rename(
+                    columns={"name": "Municipality", "composite": "Score (0-100)", "criteria_used": "Criteria used"}
+                ),
+                hide_index=True, width="stretch",
+            )
+        with col_chart:
+            chart_df = rankings.dropna(subset=["composite"]).sort_values("composite")
+            fig = go.Figure(go.Bar(
+                x=chart_df["composite"], y=chart_df["name"], orientation="h",
+                marker=dict(color=chart_df["composite"], colorscale="Blues"),
+            ))
+            fig.update_layout(title="Composite livability score", xaxis_title="Score (0-100)", height=520, margin=dict(l=10, r=10, t=40, b=10))
+            st.plotly_chart(fig, width="stretch")
+
+    st.divider()
+    st.markdown("**Municipality detail**")
+    muni_names = {p["id"]: p["name"] for p in places.values()}
+    selected_id = st.selectbox(
+        "Pick a municipality", options=list(muni_names.keys()), format_func=lambda pid: muni_names[pid],
+    )
+    if selected_id:
+        detail = places[selected_id]["criteria"]
+        for criterion in LIVABILITY_CRITERIA:
+            c = detail.get(criterion["key"], {})
+            value = c.get("value")
+            value_display = f"{value:,.1f}" if isinstance(value, (int, float)) else "not available"
+            with st.container(border=True):
+                cols = st.columns([2, 1, 3])
+                cols[0].markdown(f"**{criterion['label']}**")
+                cols[1].markdown(value_display)
+                source_bits = " · ".join(x for x in [c.get("source"), c.get("as_of")] if x)
+                note_bits = f" — {c['note']}" if c.get("note") else ""
+                cols[2].caption(f"{c.get('unit', '')} · {source_bits}{note_bits}")

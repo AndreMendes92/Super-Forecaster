@@ -17,3 +17,5 @@ services:
         sync: false
       - key: REPLIERS_API_KEY
         sync: false
+      - key: CMHC_RENT_XLSX_URL
+        sync: false

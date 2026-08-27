@@ -41,6 +41,42 @@ _HEADERS = {
 }
 
 
+def get_json(url: str, timeout: int = 15):
+    """
+    Same as post_json but for a plain GET — used by
+    livability_statcan.py to call StatCan's "full table download"
+    endpoint (getFullTableDownloadCSV/{productId}/en), which takes no
+    request body.
+    """
+    try:
+        resp = cf_requests.get(
+            url, headers=_HEADERS, timeout=timeout, impersonate="chrome124",
+            curl_options=_IPV4_ONLY,
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except cf_exceptions.RequestException as e:
+        raise requests.exceptions.RequestException(str(e)) from e
+
+
+def get_bytes(url: str, timeout: int = 60):
+    """
+    Downloads raw bytes (e.g. the CSV zip a full-table-download URL
+    points to) with the same browser-impersonating client as the rest
+    of this module. Longer default timeout than get_json/post_json
+    since these files can be several MB.
+    """
+    try:
+        resp = cf_requests.get(
+            url, headers=_HEADERS, timeout=timeout, impersonate="chrome124",
+            curl_options=_IPV4_ONLY,
+        )
+        resp.raise_for_status()
+        return resp.content
+    except cf_exceptions.RequestException as e:
+        raise requests.exceptions.RequestException(str(e)) from e
+
+
 def post_json(url: str, body, timeout: int = 15):
     """
     POSTs JSON to a StatCan WDS endpoint, impersonating a real Chrome

@@ -9,3 +9,4 @@ sqlalchemy
 psycopg2-binary
 pydantic[email]
 curl_cffi
+openpyxl
