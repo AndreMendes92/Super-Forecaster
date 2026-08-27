@@ -42,6 +42,7 @@ silently discarding everything.
 """
 
 import json
+import time
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
@@ -51,6 +52,7 @@ from .livability_geography import MUNICIPALITIES
 from .livability_statcan import fetch_crime_severity_index, fetch_population_density, fetch_median_household_income
 from .livability_osm import fetch_osm_counts
 from .livability_cmhc import fetch_average_rent_by_municipality
+from .livability_boundaries import fetch_boundary
 
 
 def _get(db: Session, key: str):
@@ -85,6 +87,15 @@ def get_cache_meta(db: Session) -> dict:
     return _get(db, "meta") or {}
 
 
+def get_cached_boundaries(db: Session) -> dict:
+    """{municipality_id: GeoJSON geometry} for the heat map — see
+    livability_boundaries.py. Fetched once per municipality, ever
+    (boundaries don't change), so this can be empty/partial right
+    after the very first refresh and fills in as later refreshes skip
+    whatever's already cached and pick up the rest."""
+    return _get(db, "boundaries") or {}
+
+
 def _match_geo(geo_values: dict, prefix: str | None):
     """
     Returns the value whose GEO/name key starts with `prefix`
@@ -103,9 +114,10 @@ def _match_geo(geo_values: dict, prefix: str | None):
 
 
 def refresh_all(db: Session) -> dict:
-    summary = {"sources_ok": [], "sources_failed": [], "municipalities_osm_failed": []}
+    summary = {"sources_ok": [], "sources_failed": [], "municipalities_osm_failed": [], "boundaries_failed": []}
 
     _set(db, "municipalities", static_municipalities())
+    boundaries = get_cached_boundaries(db)
 
     crime_by_geo, crime_year = {}, None
     try:
@@ -200,18 +212,32 @@ def refresh_all(db: Session) -> dict:
 
         places[m.id] = place
 
+        # Boundary geometry, for the heat map — fetched once ever per
+        # municipality (see livability_boundaries.py's docstring on
+        # why: it never changes, and Nominatim's usage policy asks
+        # that repeat/bulk lookups be avoided). A 1.1s pause after an
+        # actual fetch (not a skip) respects its 1-request/second cap.
+        if m.id not in boundaries:
+            try:
+                boundaries[m.id] = fetch_boundary(m.osm_area_name)
+                time.sleep(1.1)
+            except Exception as e:
+                summary["boundaries_failed"].append({"municipality": m.id, "error": str(e)})
+
         # Persist after every municipality (not just once at the end) —
         # see the module docstring for why. Cheap relative to the
         # network calls above, and means a mid-run kill still leaves
         # real, current partial data instead of silently reverting to
         # whatever the last fully-completed run produced.
         _set(db, "places", places)
+        _set(db, "boundaries", boundaries)
         _set(db, "meta", {
             "computed_at": datetime.now(timezone.utc).isoformat(),
             "municipalities_done": len(places),
             "municipalities_total": len(MUNICIPALITIES),
         })
         print(f"[livability cache refresh] {len(places)}/{len(MUNICIPALITIES)} done — {m.id}: "
-              f"crime={crime_value is not None} rent={rent_value is not None} osm={osm_counts is not None}")
+              f"crime={crime_value is not None} rent={rent_value is not None} osm={osm_counts is not None} "
+              f"boundary={m.id in boundaries}")
 
     return summary

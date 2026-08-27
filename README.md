@@ -68,6 +68,20 @@ is free public data, no API key or signup required:
 | Population density | Statistics Canada, 2021 Census (table 98-10-0002-01) | People per km². Shown, but **not counted in the ranking by default** — "denser is better" is a matter of taste, not something to score objectively. Turn its weight up and pick a direction if you disagree. |
 | Household income | Statistics Canada, 2021 Census (table 98-10-0057-01) | Median household income, shown as context next to rent — also not counted by default. |
 
+The tab's headline visual is a **heat map** of Metro Vancouver, each
+municipality shaded by its composite score (green = higher, red =
+lower). Municipality boundary shapes come from OpenStreetMap's
+Nominatim geocoder (with Photon as a fallback) — fetched once ever per
+municipality and cached permanently, since boundaries don't change and
+Nominatim's usage policy asks that repeat/bulk lookups be avoided (see
+`backend/data_sources/livability_boundaries.py`). Every refresh tries
+to fill in whichever municipalities aren't cached yet, so the map
+should have all 22 shapes after the first fully-completed refresh —
+any that keep failing (a name that doesn't resolve) show up in
+`/livability/refresh-cache`'s `boundaries_failed` summary and just
+stay missing from the map until fixed. The ranking table below the map
+works fully from the very first refresh regardless.
+
 **Honest caveat about this tab specifically**: the "Best Places to
 Live" data sources were originally wired up in an environment with no
 live network access to StatCan, CMHC, or OpenStreetMap, so the first

@@ -202,6 +202,50 @@ def _compute_rankings(places: dict, weights: dict, directions: dict) -> pd.DataF
     df.insert(0, "rank", range(1, len(df) + 1))
     return df
 
+
+def _build_heatmap_figure(chart_df: pd.DataFrame, boundaries: dict):
+    """
+    A Plotly choropleth map of Metro Vancouver, one municipality per
+    shape, shaded by composite score. Only municipalities with both a
+    score and a cached boundary (see /livability/boundaries) can be
+    drawn — boundaries fill in gradually over a municipality's first
+    couple of refreshes (see livability_boundaries.py), so this is
+    expected to be partial right after initial setup. Returns None if
+    there's nothing drawable yet, so the caller can show a plain
+    message instead of an empty map.
+    """
+    mappable = chart_df[chart_df["id"].isin(boundaries.keys())]
+    if mappable.empty:
+        return None
+
+    geojson = {
+        "type": "FeatureCollection",
+        "features": [
+            {"type": "Feature", "id": pid, "properties": {"id": pid}, "geometry": boundaries[pid]}
+            for pid in mappable["id"]
+        ],
+    }
+
+    # go.Choroplethmap (MapLibre-based, no token needed) — the modern
+    # replacement for the older, now-removed go.Choroplethmapbox.
+    fig = go.Figure(go.Choroplethmap(
+        geojson=geojson,
+        locations=mappable["id"],
+        z=mappable["composite"],
+        featureidkey="properties.id",
+        colorscale="RdYlGn", zmin=0, zmax=100,
+        marker_opacity=0.75, marker_line_width=1.2, marker_line_color="white",
+        text=mappable["name"],
+        hovertemplate="<b>%{text}</b><br>Score: %{z:.1f}/100<extra></extra>",
+        colorbar_title="Score",
+    ))
+    fig.update_layout(
+        map_style="carto-positron",
+        map_zoom=8.4, map_center={"lat": 49.22, "lon": -122.85},
+        margin=dict(l=0, r=0, t=0, b=0), height=560,
+    )
+    return fig
+
 # =======================================================================
 # TAB 1 — Explore & Forecast
 # =======================================================================
@@ -450,6 +494,8 @@ with places_tab:
 
     places = data.get("places") or {}
     meta = data.get("meta") or {}
+    boundaries, _boundaries_err = _safe_get_json("/livability/boundaries", error_label="the backend")
+    boundaries = boundaries or {}
 
     if not places:
         st.info(
@@ -480,6 +526,25 @@ with places_tab:
         st.info("Set at least one weight above 0 to see a ranking.")
     else:
         st.divider()
+        st.markdown("**Heat map**")
+        chart_df = rankings.dropna(subset=["composite"]).sort_values("composite")
+        heatmap_fig = _build_heatmap_figure(chart_df, boundaries)
+        if heatmap_fig is not None:
+            st.plotly_chart(heatmap_fig, width="stretch")
+            missing = set(chart_df["id"]) - set(boundaries.keys())
+            if missing:
+                missing_names = chart_df[chart_df["id"].isin(missing)]["name"].tolist()
+                st.caption(
+                    f"Boundary not loaded yet for: {', '.join(missing_names)} — "
+                    "these fill in over the next couple of scheduled refreshes."
+                )
+        else:
+            st.info(
+                "No municipality boundaries cached yet for the map — they load in "
+                "gradually (one new one per refresh at most, out of politeness to the "
+                "free geocoder that provides them). The ranking below still works."
+            )
+
         col_table, col_chart = st.columns([1, 1.2])
         with col_table:
             st.markdown("**Ranking**")
@@ -492,7 +557,6 @@ with places_tab:
                 hide_index=True, width="stretch",
             )
         with col_chart:
-            chart_df = rankings.dropna(subset=["composite"]).sort_values("composite")
             fig = go.Figure(go.Bar(
                 x=chart_df["composite"], y=chart_df["name"], orientation="h",
                 marker=dict(color=chart_df["composite"], colorscale="Blues"),
