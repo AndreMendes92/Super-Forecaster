@@ -22,6 +22,23 @@ returned summary dict names exactly what succeeded and failed — check
 it (or the backend logs, which print it) after the first real deploy,
 the same way statcan_cache.py's refresh summary was originally used to
 verify its own curated vector IDs.
+
+Learned the hard way on first real deploy: try/except around each
+*source* isn't enough on its own if the *whole job* takes too long —
+with every OSM/StatCan source failing, the old version's worst-case
+runtime (dozens of municipalities x multiple mirrors x long timeouts)
+could run for a very long time, and Render appears to kill/restart the
+backend process before such a run ever finishes — which silently loses
+the *entire* refresh, including the one write at the very end, leaving
+the cache stuck showing whatever the last successful run produced
+(confusingly looking like "nothing changed" rather than "this run
+never finished"). Two fixes: much shorter per-call timeouts throughout
+this codebase's livability_* modules, and — the more important one —
+this function now saves `places` and a running summary to the cache
+after *every* municipality, not just once at the end, and prints a
+one-line progress log per municipality. A mid-run kill now leaves
+real partial data and a clear stopping point in the logs, instead of
+silently discarding everything.
 """
 
 import json
@@ -183,7 +200,18 @@ def refresh_all(db: Session) -> dict:
 
         places[m.id] = place
 
-    _set(db, "places", places)
-    _set(db, "meta", {"computed_at": datetime.now(timezone.utc).isoformat()})
+        # Persist after every municipality (not just once at the end) —
+        # see the module docstring for why. Cheap relative to the
+        # network calls above, and means a mid-run kill still leaves
+        # real, current partial data instead of silently reverting to
+        # whatever the last fully-completed run produced.
+        _set(db, "places", places)
+        _set(db, "meta", {
+            "computed_at": datetime.now(timezone.utc).isoformat(),
+            "municipalities_done": len(places),
+            "municipalities_total": len(MUNICIPALITIES),
+        })
+        print(f"[livability cache refresh] {len(places)}/{len(MUNICIPALITIES)} done — {m.id}: "
+              f"crime={crime_value is not None} rent={rent_value is not None} osm={osm_counts is not None}")
 
     return summary

@@ -107,9 +107,14 @@ def fetch_full_table_csv(product_id: int) -> pd.DataFrame:
     """
     url = _static_zip_url(product_id)
     try:
-        zip_bytes = get_bytes(url, timeout=30)
+        # Short timeouts deliberately, on both attempts — see
+        # livability_cache.py's docstring: a slow/hanging fetch here,
+        # multiplied across 3 tables x 2 attempts, is exactly what made
+        # a fully-failing refresh run long enough for Render to kill
+        # the whole process before it ever finished a single write.
+        zip_bytes = get_bytes(url, timeout=15)
     except Exception:
-        resp = ipv4_http.get(url, timeout=90)
+        resp = ipv4_http.get(url, timeout=30)
         resp.raise_for_status()
         zip_bytes = resp.content
 
