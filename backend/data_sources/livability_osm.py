@@ -11,22 +11,41 @@ or for a geometry library (shapely/geopandas) — Overpass's own
 `area["name"="X"]["boundary"="administrative"]` clause does the
 point/way-in-polygon work.
 
-First real deploy already caught one thing this couldn't be tested for
-in advance: Render's outbound networking doesn't reliably support
-IPv6, and plain `requests` calls to overpass-api.de were failing with
-"Network is unreachable" (curl trying an IPv6 route with none
-available) — see ipv4_http.py, which fixes this the same way
-statcan_http.py already had to for StatCan. The exact `osm_area_name`
-per municipality (see livability_geography.py) is this module's
-remaining real risk — if a name doesn't resolve to an area, that
-municipality is recorded as failed for these three criteria rather
-than guessed at, and shows up in /livability/refresh-cache's summary
-so it's easy to spot and fix.
+First real deploy caught two things that couldn't be tested for in
+advance:
+
+1. Render's outbound networking doesn't reliably support IPv6, and
+   plain `requests` calls were failing with "Network is unreachable"
+   (curl trying an IPv6 route with none available) — see ipv4_http.py,
+   which fixes this the same way statcan_http.py already had to for
+   StatCan.
+2. Even over IPv4, overpass-api.de itself refused the connection
+   outright ("Failed to connect... Could not connect to server") —
+   that public instance is known to block/rate-limit traffic from
+   cloud-hosting IP ranges (AWS, Render, etc.) as anti-abuse
+   protection, independent of anything on this app's side. Fixed by
+   trying a short list of alternate public Overpass mirrors in order
+   and using whichever one actually accepts the connection, rather
+   than hardcoding the one host most likely to block a Render IP.
+
+The exact `osm_area_name` per municipality (see livability_geography.py)
+is this module's remaining real risk — if a name doesn't resolve to an
+area on whichever mirror answers, that municipality is recorded as
+failed for these three criteria rather than guessed at, and shows up
+in /livability/refresh-cache's summary so it's easy to spot and fix.
 """
 
 from . import ipv4_http
 
-OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+# Tried in order — the first one that accepts the connection is used.
+# overpass-api.de is the "official" instance but is known to reject
+# cloud/datacenter IPs (which is exactly what bit this on Render); the
+# other two are independently-run public mirrors that generally don't.
+OVERPASS_URLS = [
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+    "https://overpass-api.de/api/interpreter",
+]
 
 # Tag groups per criterion. Kept as Overpass QL fragments (not Python
 # data) so the query text is easy to compare directly against
@@ -55,10 +74,11 @@ _CRITERION_TAGS = {
 def _run_count_query(osm_area_name: str, tag_fragment: str) -> int:
     """
     Runs one Overpass QL query scoped to a municipality's admin
-    boundary and returns a feature count. Raises ValueError if
-    Overpass has no area for that name (distinct from a genuine zero
-    count, which is a valid — if surprising — result), or
-    requests.exceptions.RequestException on network/HTTP failure.
+    boundary and returns a feature count. Tries each URL in
+    OVERPASS_URLS in turn, moving on only on a connection-level
+    failure (a mirror refusing/unreachable) — an actual query result,
+    including a "no such area" ValueError, is trusted and returned
+    immediately rather than retried against a different mirror.
     """
     query = f"""
     [out:json][timeout:60];
@@ -68,24 +88,33 @@ def _run_count_query(osm_area_name: str, tag_fragment: str) -> int:
     );
     out count;
     """
-    resp = ipv4_http.post(OVERPASS_URL, data={"data": query}, timeout=75)
-    resp.raise_for_status()
-    data = resp.json()
 
-    elements = data.get("elements", [])
-    if not elements:
-        raise ValueError(
-            f"Overpass returned no result for area \"{osm_area_name}\" — "
-            "the OSM admin boundary name may not match (see livability_geography.py)."
-        )
+    last_network_error = None
+    for url in OVERPASS_URLS:
+        try:
+            resp = ipv4_http.post(url, data={"data": query}, timeout=75)
+            resp.raise_for_status()
+        except Exception as e:
+            last_network_error = e
+            continue
 
-    # `out count;` returns one element of type "count" with a "tags"
-    # dict like {"total": "137", "nodes": "90", "ways": "47", ...}.
-    count_tags = elements[0].get("tags", {})
-    if "total" not in count_tags:
-        raise ValueError(f"Unexpected Overpass response shape for \"{osm_area_name}\": {data}")
+        data = resp.json()
+        elements = data.get("elements", [])
+        if not elements:
+            raise ValueError(
+                f"Overpass returned no result for area \"{osm_area_name}\" — "
+                "the OSM admin boundary name may not match (see livability_geography.py)."
+            )
 
-    return int(count_tags["total"])
+        # `out count;` returns one element of type "count" with a "tags"
+        # dict like {"total": "137", "nodes": "90", "ways": "47", ...}.
+        count_tags = elements[0].get("tags", {})
+        if "total" not in count_tags:
+            raise ValueError(f"Unexpected Overpass response shape for \"{osm_area_name}\": {data}")
+
+        return int(count_tags["total"])
+
+    raise last_network_error
 
 
 def fetch_osm_counts(osm_area_name: str) -> dict[str, int]:
