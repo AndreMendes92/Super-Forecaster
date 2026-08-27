@@ -82,6 +82,30 @@ class StatcanCache(Base):
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
+class LivabilityCache(Base):
+    """
+    Same key/value cache pattern as StatcanCache above, but for the
+    "Best Places to Live" tab's Metro Vancouver municipality data
+    (crime, density, rent, walkability, transit, parks, income) — see
+    data_sources/livability_cache.py. Refreshed by a background job
+    (POST /livability/refresh-cache) rather than fetched live on every
+    page load, for the same reason: several of the underlying sources
+    (StatCan, OpenStreetMap, TransLink, CMHC) are slow or occasionally
+    unreliable to call synchronously within a request.
+
+    key examples:
+      "municipalities"       -> the 21 curated municipalities (id, name)
+      "places"                -> {municipality_id: {criterion: {...}}}
+      "computed_at"           -> ISO timestamp of the last full refresh
+    """
+
+    __tablename__ = "livability_cache"
+
+    key = Column(String, primary_key=True)
+    value_json = Column(Text, nullable=False)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
 def init_db():
     Base.metadata.create_all(bind=engine)
 

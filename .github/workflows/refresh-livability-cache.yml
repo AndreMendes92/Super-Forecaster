@@ -1,0 +1,66 @@
+name: Refresh Best-Places-to-Live cache
+
+# Runs once a month and asks the backend to refresh its cache of
+# Metro Vancouver municipality data (crime, population density, rent,
+# walkability, transit, green space, income) for the "Best Places to
+# Live" tab. Monthly (not daily, unlike refresh-statcan-cache.yml) is
+# plenty — these are census/crime/rent datasets that update
+# annually or quarterly at most, and OpenStreetMap data doesn't need
+# fresher-than-monthly either for this use.
+#
+# No extra setup needed beyond what daily-alerts.yml already requires:
+# this reuses the same ALERTS_URL / ALERTS_SECRET repo secrets, just
+# swapping the endpoint path.
+
+on:
+  schedule:
+    - cron: "0 12 1 * *"  # 12:00 UTC on the 1st of each month
+  workflow_dispatch: {}
+
+jobs:
+  refresh-cache:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call the backend's /livability/refresh-cache endpoint
+        run: |
+          if [ -z "${{ secrets.ALERTS_URL }}" ] || [ -z "${{ secrets.ALERTS_SECRET }}" ]; then
+            echo "ALERTS_URL and/or ALERTS_SECRET repo secrets are not set yet — see README.md."
+            exit 1
+          fi
+
+          REFRESH_URL="$(echo "${{ secrets.ALERTS_URL }}" | sed 's#/run-alerts$#/livability/refresh-cache#')"
+
+          # Render's free tier sleeps the backend after ~15 min idle, so the
+          # first request of the day can take up to a minute to wake it up.
+          # The endpoint itself responds immediately (the actual refresh
+          # runs in the background), so this doesn't need a long timeout.
+          http_code=$(curl -sS -o response.json -w "%{http_code}" -X POST "$REFRESH_URL" \
+            -H "X-Alerts-Secret: ${{ secrets.ALERTS_SECRET }}" \
+            --max-time 90)
+
+          echo "HTTP status: $http_code"
+          cat response.json
+          echo
+
+          if [ "$http_code" -ge 400 ]; then
+            echo "The backend returned an error."
+            exit 1
+          fi
+
+          echo "BASE_URL=$(echo "$REFRESH_URL" | sed 's#/livability/refresh-cache$##')" >> "$GITHUB_ENV"
+
+      - name: Wait for the background refresh, then confirm what got cached
+        run: |
+          # This refresh is heavier than the StatCan one (pulls 4 whole
+          # StatCan tables plus 3 Overpass queries per municipality x 22
+          # municipalities), so give it a couple of minutes before checking.
+          sleep 150
+          http_code=$(curl -sS -o places.json -w "%{http_code}" "$BASE_URL/livability/places" --max-time 30)
+          echo "GET /livability/places -> HTTP $http_code"
+          cat places.json
+          echo
+
+          if [ "$http_code" -ne 200 ]; then
+            echo "Cache refresh may not have completed successfully — check Render's logs for the [livability cache refresh] summary line."
+            exit 1
+          fi

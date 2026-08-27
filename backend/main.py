@@ -11,6 +11,13 @@ POST /statcan/refresh-cache     -> (secret-protected) refreshes the StatCan data
                                      cache in the background. Meant to be called
                                      once a day by a GitHub Actions cron job, ahead
                                      of /run-alerts.
+GET  /livability/municipalities -> the 22 curated Metro Vancouver municipalities
+GET  /livability/places         -> cached "Best Places to Live" criteria (crime,
+                                     population density, rent, walkability, transit,
+                                     green space, income) for every municipality
+POST /livability/refresh-cache  -> (secret-protected) refreshes the livability
+                                     cache in the background. Meant to be called
+                                     monthly by a GitHub Actions cron job.
 GET  /repliers/price-history    -> real (or sandbox-sample) MLS sold-price stats
 POST /forecast                   -> upload historical data + parameters,
                                      get back a forecast from one or more methods
@@ -40,6 +47,7 @@ from data_sources.statcan import fetch_statcan_vector
 from data_sources.statcan_geography import get_vector_id
 from data_sources import statcan_cache
 from data_sources.repliers import fetch_repliers_price_history, COMMON_PROPERTY_TYPES
+from data_sources import livability_cache
 from db import init_db, get_db, SessionLocal, Watch
 from notify import send_alert_email, build_alert_message
 
@@ -420,4 +428,52 @@ def refresh_statcan_cache(background_tasks: BackgroundTasks):
     Progress/results are printed to the backend's logs.
     """
     background_tasks.add_task(_run_statcan_cache_refresh)
+    return {"status": "refresh started in background — check backend logs for the summary"}
+
+
+# ---------------------------------------------------------------------
+# "Best Places to Live" — Metro Vancouver municipality livability data
+# ---------------------------------------------------------------------
+
+@app.get("/livability/municipalities")
+def livability_municipalities(db: Session = Depends(get_db)):
+    """The 22 curated Metro Vancouver municipalities (id, name) this tab scores."""
+    return livability_cache.get_cached_municipalities(db)
+
+
+@app.get("/livability/places")
+def livability_places(db: Session = Depends(get_db)):
+    """
+    Cached criteria (crime, population density, rent, walkability,
+    transit, green space, income) for every municipality, plus when
+    the cache was last refreshed. Composite scoring/weighting happens
+    client-side in the frontend so weight sliders recompute instantly.
+    """
+    return {
+        "places": livability_cache.get_cached_places(db),
+        "meta": livability_cache.get_cache_meta(db),
+    }
+
+
+def _run_livability_cache_refresh():
+    """Runs in the background — see the endpoint below. Own DB session,
+    same reasoning as _run_statcan_cache_refresh above."""
+    db = SessionLocal()
+    try:
+        summary = livability_cache.refresh_all(db)
+        print(f"[livability cache refresh] {summary}")
+    finally:
+        db.close()
+
+
+@app.post("/livability/refresh-cache", dependencies=[Depends(_verify_alerts_secret)])
+def refresh_livability_cache(background_tasks: BackgroundTasks):
+    """
+    Kicks off a refresh of the "Best Places to Live" cache in the
+    background and returns immediately. Meant to run monthly (see
+    .github/workflows/refresh-livability-cache.yml) — these datasets
+    (census, crime severity index, CMHC rent, OpenStreetMap) update far
+    less often than the daily-refreshed housing price data above.
+    """
+    background_tasks.add_task(_run_livability_cache_refresh)
     return {"status": "refresh started in background — check backend logs for the summary"}
