@@ -33,6 +33,16 @@ is this module's remaining real risk — if a name doesn't resolve to an
 area on whichever mirror answers, that municipality is recorded as
 failed for these three criteria rather than guessed at, and shows up
 in /livability/refresh-cache's summary so it's easy to spot and fix.
+
+A second real-deploy lesson (see livability_cache.py's docstring for
+the full story): trying all 3 mirrors, one after another, for every
+single criterion x municipality call (up to 66 times a full refresh)
+at a long timeout each is what actually made the whole job run long
+enough for Render to kill the process mid-refresh — even though each
+individual mirror failure was reasonably fast in practice. Two fixes:
+a much shorter per-attempt timeout (dead mirrors should fail fast, not
+eventually), and remembering which mirror last worked so later calls
+try it first instead of re-discovering it from scratch every time.
 """
 
 from . import ipv4_http
@@ -46,6 +56,13 @@ OVERPASS_URLS = [
     "https://overpass.private.coffee/api/interpreter",
     "https://overpass-api.de/api/interpreter",
 ]
+
+# Index into OVERPASS_URLS of whichever mirror last actually answered a
+# query, in this process's lifetime — tried first on the next call, so
+# a whole refresh doesn't re-fail against known-dead mirrors 22 times
+# over. Fine as plain module state: this app runs single-worker
+# (WEB_CONCURRENCY=1, see render.yaml) and refreshes run sequentially.
+_preferred_url_index = 0
 
 # Tag groups per criterion. Kept as Overpass QL fragments (not Python
 # data) so the query text is easy to compare directly against
@@ -74,14 +91,16 @@ _CRITERION_TAGS = {
 def _run_count_query(osm_area_name: str, tag_fragment: str) -> int:
     """
     Runs one Overpass QL query scoped to a municipality's admin
-    boundary and returns a feature count. Tries each URL in
-    OVERPASS_URLS in turn, moving on only on a connection-level
-    failure (a mirror refusing/unreachable) — an actual query result,
+    boundary and returns a feature count. Tries OVERPASS_URLS starting
+    from whichever one last worked (_preferred_url_index), moving on
+    only on a connection-level failure — an actual query result,
     including a "no such area" ValueError, is trusted and returned
     immediately rather than retried against a different mirror.
     """
+    global _preferred_url_index
+
     query = f"""
-    [out:json][timeout:60];
+    [out:json][timeout:20];
     area["name"="{osm_area_name}"]["boundary"="administrative"]->.a;
     (
       {tag_fragment}
@@ -89,14 +108,25 @@ def _run_count_query(osm_area_name: str, tag_fragment: str) -> int:
     out count;
     """
 
+    ordered_urls = OVERPASS_URLS[_preferred_url_index:] + OVERPASS_URLS[:_preferred_url_index]
+
     last_network_error = None
-    for url in OVERPASS_URLS:
+    for url in ordered_urls:
         try:
-            resp = ipv4_http.post(url, data={"data": query}, timeout=75)
+            # Short timeout deliberately — a mirror that's actually up
+            # answers a count-only query in a few seconds; one that's
+            # blocking/unreachable should fail fast, not eventually.
+            # See the module docstring: a long timeout here, repeated
+            # across 3 mirrors x 3 criteria x 22 municipalities, is what
+            # made a fully-failing refresh run long enough for Render
+            # to kill the process before it ever finished.
+            resp = ipv4_http.post(url, data={"data": query}, timeout=20)
             resp.raise_for_status()
         except Exception as e:
             last_network_error = e
             continue
+
+        _preferred_url_index = OVERPASS_URLS.index(url)
 
         data = resp.json()
         elements = data.get("elements", [])

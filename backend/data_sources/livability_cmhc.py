@@ -88,7 +88,7 @@ def fetch_average_rent_by_municipality(municipality_names: list[str]) -> dict[st
     one failed source rather than 22 individual ones).
     """
     url = _get_xlsx_url()
-    resp = ipv4_http.get(url, headers=_BROWSER_HEADERS, timeout=60)
+    resp = ipv4_http.get(url, headers=_BROWSER_HEADERS, timeout=20)
     resp.raise_for_status()
 
     content_type = resp.headers.get("Content-Type", "")
