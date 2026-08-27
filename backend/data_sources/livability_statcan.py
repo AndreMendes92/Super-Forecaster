@@ -22,18 +22,27 @@ e.g. https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=3510006301):
     household type, census divisions and census subdivisions, 2021
     Census
 
-First real deploy already caught one design mistake: this originally
-resolved each table's CSV zip URL via StatCan's WDS
-`getFullTableDownloadCSV` endpoint, which timed out every time on
-Render — turns out that's exactly the kind of unreliable WDS
-metadata-style call statcan_cache.py already warned about (only the
-plain vector-data endpoint, `getDataFromVectorsAndLatestNPeriods`, has
-ever been reliable from Render; every other WDS endpoint this app has
-tried — getCubeMetadata, getSeriesInfoFromCubePidCoord, and now
-getFullTableDownloadCSV — has failed). Fix: skip the WDS lookup
-entirely and hit StatCan's static bulk-download URL directly
-(`n1/tbl/csv/{8-digit-pid}-eng.zip`), a plain file GET rather than a
-dynamic query.
+Two real-deploy surprises so far, neither fully resolved:
+
+1. This originally resolved each table's CSV zip URL via StatCan's WDS
+   `getFullTableDownloadCSV` endpoint, which timed out every time on
+   Render — in line with statcan_cache.py's warning that every WDS
+   endpoint except the plain vector-data one
+   (`getDataFromVectorsAndLatestNPeriods`) has been unreliable from
+   Render. Fixed by skipping the WDS lookup and hitting StatCan's
+   static bulk-download URL directly (`n1/tbl/csv/{8-digit-pid}-eng.zip`).
+2. That static URL *also* times out — even as a plain file GET with
+   the same browser-impersonating, IPv4-forced client
+   (statcan_http.py) that reliably serves the vector endpoint
+   elsewhere in this app. Since the one thing that's actually worked
+   for StatCan on Render is a *non*-impersonated-looking plain request
+   to the vector endpoint, `fetch_full_table_csv` now also tries a
+   second, non-impersonated request (ipv4_http.py, same IPv4 fix but
+   no Chrome fingerprint) if the impersonated one times out — on the
+   theory that this particular path's bot-filtering may specifically
+   be keying off the impersonated TLS fingerprint rather than treating
+   it as a free pass. Unverified as of this edit; check
+   /livability/refresh-cache's summary after deploying.
 
 The column-name matching below (_find_col) is deliberately tolerant of
 StatCan's two common table shapes (long-format with a
@@ -51,6 +60,7 @@ import zipfile
 import pandas as pd
 
 from .statcan_http import get_bytes
+from . import ipv4_http
 
 CRIME_PID = 3510006301
 POPULATION_PID = 9810000201
@@ -91,9 +101,17 @@ def fetch_full_table_csv(product_id: int) -> pd.DataFrame:
     """
     Downloads a StatCan table's full data from its static bulk-CSV zip
     URL (a plain file GET, not a WDS query — see the module docstring
-    for why) and returns it as a DataFrame.
+    for why) and returns it as a DataFrame. Tries a Chrome-impersonated
+    request first, then a plain (non-impersonated) one — see the
+    module docstring for why both are worth trying here.
     """
-    zip_bytes = get_bytes(_static_zip_url(product_id), timeout=90)
+    url = _static_zip_url(product_id)
+    try:
+        zip_bytes = get_bytes(url, timeout=30)
+    except Exception:
+        resp = ipv4_http.get(url, timeout=90)
+        resp.raise_for_status()
+        zip_bytes = resp.content
 
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
         csv_names = [n for n in zf.namelist() if n.lower().endswith(".csv") and "metadata" not in n.lower()]
