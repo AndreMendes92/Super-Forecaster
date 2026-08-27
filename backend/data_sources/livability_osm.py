@@ -11,21 +11,20 @@ or for a geometry library (shapely/geopandas) — Overpass's own
 `area["name"="X"]["boundary"="administrative"]` clause does the
 point/way-in-polygon work.
 
-None of this has been run against a live response — the environment
-this was built in has no outbound network access to overpass-api.de
-at all (every external host this app touches was unreachable from
-that sandbox; see the long comment in statcan_http.py for the same
-situation with StatCan, which *has* been live-verified in the past,
-unlike this module). The Overpass query shapes below follow Overpass
-QL's documented syntax, but the exact `osm_area_name` per municipality
-(see livability_geography.py) is this module's biggest real risk —
-if a name doesn't resolve to an area, that municipality is recorded as
-failed for these three criteria rather than guessed at, and shows up
-in /livability/refresh-cache's summary so it's easy to spot and fix
-after the first real deploy.
+First real deploy already caught one thing this couldn't be tested for
+in advance: Render's outbound networking doesn't reliably support
+IPv6, and plain `requests` calls to overpass-api.de were failing with
+"Network is unreachable" (curl trying an IPv6 route with none
+available) — see ipv4_http.py, which fixes this the same way
+statcan_http.py already had to for StatCan. The exact `osm_area_name`
+per municipality (see livability_geography.py) is this module's
+remaining real risk — if a name doesn't resolve to an area, that
+municipality is recorded as failed for these three criteria rather
+than guessed at, and shows up in /livability/refresh-cache's summary
+so it's easy to spot and fix.
 """
 
-import requests
+from . import ipv4_http
 
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 
@@ -69,7 +68,7 @@ def _run_count_query(osm_area_name: str, tag_fragment: str) -> int:
     );
     out count;
     """
-    resp = requests.post(OVERPASS_URL, data={"data": query}, timeout=75)
+    resp = ipv4_http.post(OVERPASS_URL, data={"data": query}, timeout=75)
     resp.raise_for_status()
     data = resp.json()
 

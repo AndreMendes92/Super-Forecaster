@@ -68,18 +68,29 @@ is free public data, no API key or signup required:
 | Population density | Statistics Canada, 2021 Census (table 98-10-0002-01) | People per km². Shown, but **not counted in the ranking by default** — "denser is better" is a matter of taste, not something to score objectively. Turn its weight up and pick a direction if you disagree. |
 | Household income | Statistics Canada, 2021 Census (table 98-10-0057-01) | Median household income, shown as context next to rent — also not counted by default. |
 
-**Honest caveat about this tab specifically**: unlike the housing-price
-tracker above (whose StatCan integration has been live-verified against
-a real deployment), the "Best Places to Live" data sources were wired
-up in an environment with no live network access to StatCan, CMHC, or
-OpenStreetMap — so treat the very first `POST /livability/refresh-cache`
-after deploying as a verification step, not a given. Check its response
-summary (also printed to Render's logs) for `sources_failed` or
-`municipalities_osm_failed` entries, and fix from there — the same
-process this repo's own StatCan integration went through before it was
-solid. Weighting/ranking math itself is fully tested (see the "Compute
-rankings" logic in `frontend/app.py`) — it's specifically the raw data
-fetches that need that one real-world check.
+**Honest caveat about this tab specifically**: the "Best Places to
+Live" data sources were originally wired up in an environment with no
+live network access to StatCan, CMHC, or OpenStreetMap, so the first
+real `POST /livability/refresh-cache` on Render doubled as their actual
+verification step — the same process this repo's own StatCan
+integration went through before it was solid. That first run caught
+and fixed two real bugs (StatCan's crime/census tables were being
+fetched via an unreliable WDS endpoint — switched to a direct static
+CSV download; OpenStreetMap calls were failing with Render's known
+IPv6 routing issue — switched to the same forced-IPv4 fix StatCan
+already uses). **Rent is still unresolved**: the guessed CMHC download
+URL returned a 403 (it's the HTML page that *links to* the real
+workbook, not the workbook itself). To fix it: open
+[CMHC's Rental Market Report Data Tables page](https://www.cmhc-schl.gc.ca/professionals/housing-markets-data-and-research/housing-data/data-tables/rental-market/rental-market-report-data-tables)
+in a real browser, find the current Metro Vancouver / Vancouver CMA
+data table download link (should end in `.xlsx`), and set it as
+`CMHC_RENT_XLSX_URL` in Render's environment variables — no redeploy
+or code change needed, just re-run the refresh workflow after. Until
+then, the "Affordability" criterion shows "not available" for every
+municipality; everything else should be populated. Weighting/ranking
+math itself is fully tested (see the "Compute rankings" logic in
+`frontend/app.py`) — it was always the raw data fetches that needed
+that real-world check.
 
 ---
 

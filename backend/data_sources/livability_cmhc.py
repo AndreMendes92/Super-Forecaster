@@ -29,6 +29,15 @@ be wrong or CMHC moves the file, it's a one-line env var fix on Render
 (no redeploy needed), the same escape hatch REPLIERS_API_KEY already
 gives this app for its own uncertain dependency.
 
+CONFIRMED WRONG on first real deploy: the guessed default URL below
+returned a 403. It's the HTML page that *links to* the real workbook,
+not the workbook itself — and CMHC's site seems to reject non-browser
+requests on top of that (see _BROWSER_HEADERS below, added after that
+same first deploy). Finding the real link needs an actual browser:
+open the page below, find the current Metro Vancouver / Vancouver CMA
+rental market data table download (likely an .xlsx), and set
+`CMHC_RENT_XLSX_URL` on Render to that real link — see README.md.
+
 If this module fails outright (bad URL, unexpected workbook layout,
 etc.), livability_cache.py records it as a failed source and every
 municipality's housing-cost criterion shows "not available" rather
@@ -40,16 +49,26 @@ import os
 
 import pandas as pd
 
+from . import ipv4_http
+
 # Best documented guess at CMHC's current Metro Vancouver primary
 # rental market data table, per the "Rental Market Report Data Tables"
 # listing linked from
 # https://www.cmhc-schl.gc.ca/professionals/housing-markets-data-and-research/housing-data/data-tables/rental-market
-# Override with the real URL via Render's environment variables if
-# this is stale.
+# Known wrong (see module docstring) — override with the real URL via
+# CMHC_RENT_XLSX_URL on Render.
 DEFAULT_CMHC_RENT_XLSX_URL = (
     "https://www.cmhc-schl.gc.ca/professionals/housing-markets-data-and-research/"
     "housing-data/data-tables/rental-market/rental-market-report-data-tables"
 )
+
+# A plain server-side request with no browser-like headers is exactly
+# the shape CMHC's front door (like StatCan's — see statcan_http.py)
+# tends to reject.
+_BROWSER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/octet-stream,*/*",
+}
 
 
 def _get_xlsx_url() -> str:
@@ -68,10 +87,18 @@ def fetch_average_rent_by_municipality(municipality_names: list[str]) -> dict[st
     file can't be fetched or parsed at all (a total failure, logged as
     one failed source rather than 22 individual ones).
     """
-    import requests  # local import: this is the one non-StatCan HTTP call in this module
-
-    resp = requests.get(_get_xlsx_url(), timeout=60)
+    url = _get_xlsx_url()
+    resp = ipv4_http.get(url, headers=_BROWSER_HEADERS, timeout=60)
     resp.raise_for_status()
+
+    content_type = resp.headers.get("Content-Type", "")
+    if "html" in content_type.lower() or resp.content[:2] != b"PK":  # .xlsx files are zip archives, so they start with "PK"
+        raise ValueError(
+            f"{url} didn't return a real .xlsx file (Content-Type: {content_type!r}) — "
+            "this is almost certainly the wrong URL (e.g. an HTML listing page instead "
+            "of the actual workbook). Set CMHC_RENT_XLSX_URL on Render to the correct "
+            "download link — see the module docstring and README.md."
+        )
 
     sheets = pd.read_excel(io.BytesIO(resp.content), sheet_name=None, header=None)
 

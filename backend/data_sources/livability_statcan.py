@@ -22,20 +22,27 @@ e.g. https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=3510006301):
     household type, census divisions and census subdivisions, 2021
     Census
 
-IMPORTANT — same caveat as livability_osm.py: this was written with no
-outbound network access to StatCan at all (the sandbox this was built
-in couldn't reach www150.statcan.gc.ca either — see statcan_http.py's
-docstring for the long history of StatCan being finicky to call even
-when reachable). The three pid values above are this module's best
-documented understanding, not a live-verified list the way
-statcan_cache.py's CURATED_VECTORS are. The column-name matching below
-(_find_col) is deliberately tolerant of StatCan's two common table
-shapes (long-format with a "Statistics"/characteristic + VALUE column,
-or wide-format with one column per characteristic) specifically
-because which shape these three tables actually use couldn't be
-confirmed here — but a genuinely unexpected layout still raises a
-clear ValueError rather than silently returning wrong numbers, and
-that error surfaces per-table in /livability/refresh-cache's summary.
+First real deploy already caught one design mistake: this originally
+resolved each table's CSV zip URL via StatCan's WDS
+`getFullTableDownloadCSV` endpoint, which timed out every time on
+Render — turns out that's exactly the kind of unreliable WDS
+metadata-style call statcan_cache.py already warned about (only the
+plain vector-data endpoint, `getDataFromVectorsAndLatestNPeriods`, has
+ever been reliable from Render; every other WDS endpoint this app has
+tried — getCubeMetadata, getSeriesInfoFromCubePidCoord, and now
+getFullTableDownloadCSV — has failed). Fix: skip the WDS lookup
+entirely and hit StatCan's static bulk-download URL directly
+(`n1/tbl/csv/{8-digit-pid}-eng.zip`), a plain file GET rather than a
+dynamic query.
+
+The column-name matching below (_find_col) is deliberately tolerant of
+StatCan's two common table shapes (long-format with a
+"Statistics"/characteristic + VALUE column, or wide-format with one
+column per characteristic) since which shape these three tables
+actually use hadn't been confirmed as of this module's last edit — a
+genuinely unexpected layout still raises a clear ValueError rather
+than silently returning wrong numbers, surfaced per-table in
+/livability/refresh-cache's summary.
 """
 
 import io
@@ -43,9 +50,7 @@ import zipfile
 
 import pandas as pd
 
-from .statcan_http import get_json, get_bytes
-
-WDS_BASE = "https://www150.statcan.gc.ca/t1/wds/rest"
+from .statcan_http import get_bytes
 
 CRIME_PID = 3510006301
 POPULATION_PID = 9810000201
@@ -72,18 +77,23 @@ def _require_col(df: pd.DataFrame, must_contain: list[str], table_label: str) ->
     return col
 
 
+def _static_zip_url(product_id: int) -> str:
+    """
+    StatCan's product IDs are 10 digits (8-digit table id + 2-digit
+    cube/version suffix, e.g. 3510006301 = table 35-10-0063-01). The
+    static bulk-CSV download drops that last 2-digit suffix, e.g.
+    https://www150.statcan.gc.ca/n1/tbl/csv/35100063-eng.zip
+    """
+    return f"https://www150.statcan.gc.ca/n1/tbl/csv/{str(product_id)[:8]}-eng.zip"
+
+
 def fetch_full_table_csv(product_id: int) -> pd.DataFrame:
     """
-    Downloads a StatCan table's full data via the WDS "full table
-    download" endpoint (resolves to a CSV zip URL, then fetches and
-    unzips it) and returns it as a DataFrame.
+    Downloads a StatCan table's full data from its static bulk-CSV zip
+    URL (a plain file GET, not a WDS query — see the module docstring
+    for why) and returns it as a DataFrame.
     """
-    meta = get_json(f"{WDS_BASE}/getFullTableDownloadCSV/{product_id}/en")
-    if not meta or meta.get("status") != "SUCCESS":
-        raise ValueError(f"StatCan getFullTableDownloadCSV failed for product {product_id}: {meta}")
-
-    zip_url = meta["object"]
-    zip_bytes = get_bytes(zip_url, timeout=90)
+    zip_bytes = get_bytes(_static_zip_url(product_id), timeout=90)
 
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
         csv_names = [n for n in zf.namelist() if n.lower().endswith(".csv") and "metadata" not in n.lower()]
