@@ -20,17 +20,20 @@ only follow-up.
 Two fields carry real uncertainty, flagged rather than guessed away:
 
 - `police_service_match`: the prefix StatCan's Crime Severity Index
-  table uses for this municipality's police service (e.g. Maple Ridge
-  -> "Ridge Meadows RCMP", since Maple Ridge and Pitt Meadows share one
-  RCMP detachment). First real deploy already proved one guess wrong
-  and taught a general lesson: "Vancouver Police" (this table's actual
-  Vancouver row apparently isn't named that way) failed to match while
-  a plain "Burnaby" succeeded — so every entry here now uses the bare
-  municipality name unless it's one of the genuinely shared detachments
-  (Ridge Meadows, Langley, North Vancouver), where a bare name
-  wouldn't work at all. Set to None for the small remainder whose
-  policing arrangement wasn't confident enough to guess even that far
-  (e.g. Port Coquitlam, White Rock) — those simply show "not available"
+  table uses to identify this municipality's row. Two real-deploy
+  rounds taught the same lesson twice: every guess that appended
+  "Police"/"RCMP" to a name ("Vancouver Police", "Coquitlam RCMP",
+  "Ridge Meadows RCMP", "Langley RCMP", "North Vancouver RCMP", ...)
+  failed to match, while the bare name alone always worked — so this
+  table's GEO column is apparently just plain municipality/area names,
+  not full police-service names, despite the table's own title. Every
+  entry here now uses a bare name, including the three genuinely
+  shared-detachment groups (Ridge Meadows for Maple Ridge + Pitt
+  Meadows, Langley for both Langley entries, North Vancouver for both
+  North Van entries) — verify against a live refresh if you add more.
+  Set to None for the small remainder whose policing arrangement
+  wasn't confident enough to guess even that far (e.g. Port Coquitlam,
+  White Rock) — those simply show "not available"
   for crime rather than risking a wrong number.
 - `osm_area_name`: the `name` tag Nominatim/OpenStreetMap uses for this
   municipality's administrative boundary relation. Best documented
@@ -59,23 +62,23 @@ MUNICIPALITIES: list[Municipality] = [
     Municipality("richmond", "Richmond", "Richmond", "Richmond", "Richmond"),
     Municipality("coquitlam", "Coquitlam", "Coquitlam", "Coquitlam", "Coquitlam"),
     Municipality("delta", "Delta", "Delta", "Delta", "Delta"),
-    Municipality("langley_township", "Langley Township", "Township of Langley", "Langley RCMP",
+    Municipality("langley_township", "Langley Township", "Township of Langley", "Langley",
                   "Langley (T)", shared_police_note="shares Langley RCMP with Langley City"),
-    Municipality("langley_city", "Langley City", "City of Langley", "Langley RCMP",
+    Municipality("langley_city", "Langley City", "City of Langley", "Langley",
                   "Langley (C)", shared_police_note="shares Langley RCMP with Langley Township"),
     Municipality("new_westminster", "New Westminster", "New Westminster", "New Westminster", "New Westminster"),
     Municipality("north_van_district", "North Vancouver (District)", "District of North Vancouver",
-                  "North Vancouver RCMP", "North Vancouver (DM)",
+                  "North Vancouver", "North Vancouver (DM)",
                   shared_police_note="shares North Vancouver RCMP with the City of North Vancouver"),
     Municipality("north_van_city", "North Vancouver (City)", "City of North Vancouver",
-                  "North Vancouver RCMP", "North Vancouver (CY)",
+                  "North Vancouver", "North Vancouver (CY)",
                   shared_police_note="shares North Vancouver RCMP with the District of North Vancouver"),
     Municipality("west_vancouver", "West Vancouver", "West Vancouver", "West Vancouver", "West Vancouver"),
     Municipality("port_coquitlam", "Port Coquitlam", "Port Coquitlam", None, "Port Coquitlam"),
     Municipality("port_moody", "Port Moody", "Port Moody", "Port Moody", "Port Moody"),
-    Municipality("maple_ridge", "Maple Ridge", "Maple Ridge", "Ridge Meadows RCMP", "Maple Ridge",
+    Municipality("maple_ridge", "Maple Ridge", "Maple Ridge", "Ridge Meadows", "Maple Ridge",
                   shared_police_note="shares Ridge Meadows RCMP with Pitt Meadows"),
-    Municipality("pitt_meadows", "Pitt Meadows", "Pitt Meadows", "Ridge Meadows RCMP", "Pitt Meadows",
+    Municipality("pitt_meadows", "Pitt Meadows", "Pitt Meadows", "Ridge Meadows", "Pitt Meadows",
                   shared_police_note="shares Ridge Meadows RCMP with Maple Ridge"),
     Municipality("white_rock", "White Rock", "White Rock", None, "White Rock"),
     Municipality("anmore", "Anmore", "Anmore", None, "Anmore"),
