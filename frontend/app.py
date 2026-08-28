@@ -478,7 +478,13 @@ with alerts_tab:
 # TAB 3 — Best Places to Live (Metro Vancouver)
 # =======================================================================
 with places_tab:
-    st.subheader("Compare Metro Vancouver municipalities")
+    header_col, refresh_col = st.columns([5, 1])
+    with header_col:
+        st.subheader("Compare Metro Vancouver municipalities")
+    with refresh_col:
+        if st.button("🔄 Refresh data", help="Backend responses are cached for up to an hour — click to bypass that and pull the latest cached values now."):
+            _get_json.clear()
+            st.rerun()
     st.caption(
         "Scored across the 21 Metro Vancouver municipalities + Electoral Area A — "
         "the coarsest granularity, but the only one where every criterion below has "
