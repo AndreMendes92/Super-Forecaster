@@ -38,23 +38,33 @@ Two real-deploy surprises so far, neither fully resolved:
    for StatCan on Render is a *non*-impersonated-looking plain request
    to the vector endpoint, `fetch_full_table_csv` now also tries a
    second, non-impersonated request (ipv4_http.py, same IPv4 fix but
-   no Chrome fingerprint) if the impersonated one times out — on the
-   theory that this particular path's bot-filtering may specifically
-   be keying off the impersonated TLS fingerprint rather than treating
-   it as a free pass. Unverified as of this edit; check
-   /livability/refresh-cache's summary after deploying.
+   no Chrome fingerprint) if the impersonated one times out — confirmed
+   live: this combination reliably downloads all three tables now.
+3. The crime table (35-10-0063) and household income table (98-10-0057)
+   both come back as real zip files at the URL pattern above — but the
+   population/density table (98-10-0002) came back as *something*
+   that isn't a valid zip, confirmed live (`zipfile.BadZipFile`).
+   `fetch_full_table_csv` now falls back to parsing the same bytes as
+   a plain CSV in that case, on the chance that specific product ID's
+   "zip" URL actually just serves an uncompressed file. Unverified as
+   of this edit.
 
 The column-name matching below (_find_col) is deliberately tolerant of
 StatCan's two common table shapes (long-format with a
 "Statistics"/characteristic + VALUE column, or wide-format with one
-column per characteristic) since which shape these three tables
-actually use hadn't been confirmed as of this module's last edit — a
-genuinely unexpected layout still raises a clear ValueError rather
-than silently returning wrong numbers, surfaced per-table in
-/livability/refresh-cache's summary.
+column per characteristic). Confirmed live which shape each table
+actually uses: the household income table is "wide", with real column
+headers like "Household income statistics (6):Median household total
+income (2020) (2020 constant dollars)[3]" — fetch_median_household_income()
+matches that directly rather than going through the generic long/wide
+guessing _find_col does for the other two tables (whose actual shape
+hasn't been confirmed the same way yet). A genuinely unexpected layout
+still raises a clear ValueError rather than silently returning wrong
+numbers, surfaced per-table in /livability/refresh-cache's summary.
 """
 
 import io
+import re
 import zipfile
 
 import pandas as pd
@@ -118,12 +128,24 @@ def fetch_full_table_csv(product_id: int) -> pd.DataFrame:
         resp.raise_for_status()
         zip_bytes = resp.content
 
-    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-        csv_names = [n for n in zf.namelist() if n.lower().endswith(".csv") and "metadata" not in n.lower()]
-        if not csv_names:
-            raise ValueError(f"No data CSV found in the downloaded zip for product {product_id} (files: {zf.namelist()})")
-        with zf.open(csv_names[0]) as f:
-            return pd.read_csv(f, low_memory=False)
+    try:
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            csv_names = [n for n in zf.namelist() if n.lower().endswith(".csv") and "metadata" not in n.lower()]
+            if not csv_names:
+                raise ValueError(f"No data CSV found in the downloaded zip for product {product_id} (files: {zf.namelist()})")
+            with zf.open(csv_names[0]) as f:
+                return pd.read_csv(f, low_memory=False)
+    except zipfile.BadZipFile:
+        # Seen live for one of these three tables (not all) — that URL
+        # apparently doesn't serve a zip for every product ID, so try
+        # reading the same bytes as a plain CSV before giving up.
+        try:
+            return pd.read_csv(io.BytesIO(zip_bytes), low_memory=False)
+        except Exception as e:
+            raise ValueError(
+                f"{url} didn't return a zip or a readable CSV for product {product_id} "
+                f"(got {len(zip_bytes)} bytes) — original error: {e}"
+            )
 
 
 def fetch_crime_severity_index() -> tuple[dict[str, float], str | None]:
@@ -219,31 +241,50 @@ def fetch_population_density() -> dict[str, dict]:
 
 def fetch_median_household_income() -> dict[str, float]:
     """
-    Returns {census-division/subdivision GEO name: median total income
-    of households (dollars)} from the most recent year in the table.
+    Returns {census-division/subdivision GEO name: median total
+    (pre-tax) household income (dollars), most recent year available}.
+
+    Confirmed live (see the module docstring) that this table is
+    "wide": one column per characteristic, headers like "Household
+    income statistics (6):Median household total income (2020) (2020
+    constant dollars)[3]" and "...(2015) (2020 constant dollars)[4]"
+    side by side for the same statistic in different reference years —
+    so this picks whichever "median household total income (YYYY)"
+    column has the highest YYYY, rather than relying on _find_col's
+    first-match-wins behavior (which would just pick whichever year
+    happens to come first in the file, not necessarily the latest one).
     """
     df = fetch_full_table_csv(INCOME_PID)
     geo_col = _require_col(df, ["geo"], "the household income table")
-    date_col = _find_col(df, ["ref_date"])
-    value_col = _require_col(df, ["value"], "the household income table")
-    stat_col = _find_col(df, ["statistics"]) or _find_col(df, ["household income statistics"]) or _find_col(df, ["characteristic"])
+
+    year_pattern = re.compile(r"median household total income\s*\((\d{4})\)", re.IGNORECASE)
+    year_columns = [(int(m.group(1)), col) for col in df.columns if (m := year_pattern.search(str(col)))]
+    if not year_columns:
+        raise ValueError(
+            "Couldn't find a 'median household total income (YYYY)' column in the "
+            f"household income table (columns were: {list(df.columns)}) — update livability_statcan.py."
+        )
+    _latest_year, value_col = max(year_columns)
+
     household_type_col = _find_col(df, ["household type"])
-
     rows = df
-    if stat_col:
-        rows = rows[rows[stat_col].astype(str).str.contains("median total income of household", case=False, na=False)]
     if household_type_col:
-        rows = rows[rows[household_type_col].astype(str).str.contains("total.*household|all household", case=False, na=False, regex=True)]
+        totals_only = rows[rows[household_type_col].astype(str).str.contains("total", case=False, na=False)]
+        # If nothing says "total" outright, this table's category
+        # wording differs from what was guessed here — fall back to
+        # the unfiltered rows (one row per geo x household-type
+        # combination) rather than returning no income data at all.
+        # groupby(...).first() below then just takes whichever
+        # category comes first per geo, which won't always be the
+        # true aggregate — acceptable since this criterion is shown as
+        # context only, never counted in the composite score by default.
+        rows = totals_only if not totals_only.empty else rows
 
-    if rows.empty:
-        raise ValueError("No 'median total income of household' rows found — check table 98-10-0057-01's column values.")
-
-    if date_col:
-        latest_year = rows[date_col].max()
-        rows = rows[rows[date_col] == latest_year]
+    rows = rows[rows[geo_col].notna() & rows[value_col].notna()]
+    first_per_geo = rows.groupby(geo_col, sort=False).first()
 
     return {
-        str(row[geo_col]): float(row[value_col])
-        for _, row in rows.iterrows()
-        if pd.notna(row[value_col])
+        str(geo): float(value)
+        for geo, value in first_per_geo[value_col].items()
+        if pd.notna(value)
     }
