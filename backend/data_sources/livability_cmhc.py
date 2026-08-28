@@ -123,4 +123,28 @@ def fetch_average_rent_by_municipality(municipality_names: list[str]) -> dict[st
             if not plausible.empty:
                 result[muni] = float(plausible.iloc[0])
 
+    if not result:
+        # A real workbook downloaded and parsed with zero matches is a
+        # silent failure worse than an exception: it looks identical to
+        # "CMHC has no data for these places" instead of "the matching
+        # logic is wrong" (most likely: CMHC's rows are labeled by
+        # zone/CMA, not by plain municipality name — an assumption this
+        # module made without ever seeing a real workbook). Surface a
+        # sample of what row labels this workbook actually has, so the
+        # next refresh-cache summary/log is enough to fix the matching
+        # logic without another blind guess.
+        sample_labels = []
+        for sheet_df in sheets.values():
+            first_col = sheet_df.iloc[:, 0].dropna().astype(str).str.strip()
+            sample_labels.extend(v for v in first_col if v and not v.replace(".", "", 1).isdigit())
+            if len(sample_labels) >= 15:
+                break
+        raise ValueError(
+            f"Downloaded a real workbook from {url} but matched 0 of "
+            f"{len(municipality_names)} municipality names against any cell. "
+            "The row/column labels in this workbook probably don't match plain "
+            "municipality names (CMHC often organizes by zone or CMA, not "
+            f"municipality) — a sample of labels actually found: {sample_labels[:15]!r}"
+        )
+
     return result

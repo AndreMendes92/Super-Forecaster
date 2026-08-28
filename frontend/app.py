@@ -140,25 +140,40 @@ LIVABILITY_CRITERIA = [
 
 def _normalize_criterion(raw_values: dict, higher_is_better: bool) -> dict:
     """
-    Min-max scales a {municipality_id: value} dict to 0-100, flipped
-    when lower is better. Municipalities with a None value are simply
-    left out of the returned dict (not scored 0) — the composite-score
-    step below treats a missing sub-score as "excluded from this
-    municipality's average", not "penalized".
+    Percentile-rank scales a {municipality_id: value} dict to 0-100,
+    flipped when lower is better. Municipalities with a None value are
+    simply left out of the returned dict (not scored 0) — the
+    composite-score step below treats a missing sub-score as "excluded
+    from this municipality's average", not "penalized".
+
+    Deliberately rank-based, not min-max: min-max scaling lets one
+    outlier stretch a criterion's whole range and compress every other
+    municipality into a narrow band near one end (e.g. Vancouver's
+    population density dwarfing every suburb) — real user-reported
+    symptom: dragging a heavily-weighted slider barely moved the
+    composite score, because that criterion wasn't actually
+    discriminating between most municipalities even at full weight.
+    Percentile rank fixes that structurally: every weighted criterion
+    contributes an evenly-spread 0-100 signal by construction,
+    regardless of its raw distribution's shape, so each slider has a
+    comparable, visible effect on the result.
+
+    Ties get the *average* of the ranks they'd otherwise occupy (via
+    pandas' default rank method), not an arbitrary tiebreak order —
+    several municipalities share an identical crime value on purpose
+    (shared police detachments, e.g. Ridge Meadows RCMP covering both
+    Maple Ridge and Pitt Meadows; see livability_geography.py on the
+    backend), and they should keep scoring identically here too.
     """
     valid = {k: v for k, v in raw_values.items() if v is not None}
-    if len(valid) < 2:
+    n = len(valid)
+    if n < 2:
         return {k: 50.0 for k in valid}
-    lo, hi = min(valid.values()), max(valid.values())
-    if hi == lo:
-        return {k: 50.0 for k in valid}
-    scaled = {}
-    for k, v in valid.items():
-        pct = (v - lo) / (hi - lo)
-        if not higher_is_better:
-            pct = 1 - pct
-        scaled[k] = pct * 100
-    return scaled
+    ranks = pd.Series(valid).rank(method="average")  # 1..n, ties share the average rank
+    pct = (ranks - 1) / (n - 1) * 100
+    if not higher_is_better:
+        pct = 100 - pct
+    return pct.to_dict()
 
 
 def _compute_rankings(places: dict, weights: dict, directions: dict) -> pd.DataFrame:
