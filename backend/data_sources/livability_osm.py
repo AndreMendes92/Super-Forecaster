@@ -1,6 +1,17 @@
 """
 livability_osm.py
 -------------------
+SUPERSEDED — no longer called from livability_cache.py. Kept for its
+debugging history (below), not deleted, because it's a real record of
+what was tried and why each attempt failed. See
+livability_osm_extract.py for the current approach: after this
+module's live Overpass queries turned out to be blocked from Render's
+network at the raw TCP level across five independent public instances
+— not fixable by TLS impersonation, since that only matters *after* a
+connection succeeds — walkability/transit/green space now come from a
+downloaded static OSM data extract, processed locally, instead of a
+live query API.
+
 Three of the seven "Best Places to Live" criteria — walkability,
 transit access, and green space — are all sourced the same way: a
 single free, no-signup, no-API-key host (the OpenStreetMap Overpass
@@ -65,6 +76,8 @@ OVERPASS_URLS = [
     "https://overpass.kumi.systems/api/interpreter",
     "https://overpass.private.coffee/api/interpreter",
     "https://overpass-api.de/api/interpreter",
+    "https://overpass.osm.ch/api/interpreter",
+    "https://overpass.openstreetmap.ru/api/interpreter",
 ]
 
 # Index into OVERPASS_URLS of whichever mirror last actually answered a

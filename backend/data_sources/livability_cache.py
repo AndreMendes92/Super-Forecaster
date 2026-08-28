@@ -14,14 +14,15 @@ update annually/quarterly at most) by
 .github/workflows/refresh-livability-cache.yml.
 
 refresh_all() never lets one bad source take down the whole refresh —
-each of the four whole-table pulls (crime, population/density, income,
-rent) and each municipality's Overpass lookup is wrapped individually,
-so a single failure just means that criterion/municipality shows "not
-available" in the UI instead of a stale or half-written cache. The
-returned summary dict names exactly what succeeded and failed — check
-it (or the backend logs, which print it) after the first real deploy,
-the same way statcan_cache.py's refresh summary was originally used to
-verify its own curated vector IDs.
+each of the five whole-region pulls (crime, population/density,
+income, rent, and OSM walkability/transit/green-space counts — see
+livability_osm_extract.py) is wrapped individually, so a single
+failure just means that criterion shows "not available" in the UI
+instead of a stale or half-written cache. The returned summary dict
+names exactly what succeeded and failed — check it (or the backend
+logs, which print it) after the first real deploy, the same way
+statcan_cache.py's refresh summary was originally used to verify its
+own curated vector IDs.
 
 Learned the hard way on first real deploy: try/except around each
 *source* isn't enough on its own if the *whole job* takes too long —
@@ -39,6 +40,21 @@ after *every* municipality, not just once at the end, and prints a
 one-line progress log per municipality. A mid-run kill now leaves
 real partial data and a clear stopping point in the logs, instead of
 silently discarding everything.
+
+Learned the hard way *again*, on a run where StatCan happened to fail
+all three of its tables at once: the previous version re-fetched every
+whole-table source from scratch on every refresh and rebuilt `places`
+entirely from that run's results — so a single bad-luck run against a
+flaky external host didn't just fail to add new data, it silently
+*erased* previously-good data by overwriting it with nulls. Fixed by
+caching each raw source (crime, population, income, rent, and OSM
+counts) permanently under its own key, the same way boundaries already
+were — a refresh only ever overwrites a cached source when a fetch
+actually succeeds; on failure it falls back to whatever was last
+cached (there may be nothing cached yet, in which case it's still "not
+available", same as before). Each of those five fetches also gets one
+quick retry before falling back, to absorb a short blip rather than
+treating it the same as a real outage.
 """
 
 import json
@@ -50,7 +66,7 @@ from sqlalchemy.orm import Session
 from db import LivabilityCache
 from .livability_geography import MUNICIPALITIES
 from .livability_statcan import fetch_crime_severity_index, fetch_population_density, fetch_median_household_income
-from .livability_osm import fetch_osm_counts
+from .livability_osm_extract import fetch_all_osm_counts
 from .livability_cmhc import fetch_average_rent_by_municipality
 from .livability_boundaries import fetch_boundary
 
@@ -113,39 +129,65 @@ def _match_geo(geo_values: dict, prefix: str | None):
     return None
 
 
+def _fetch_with_fallback(db: Session, summary: dict, cache_key: str, fetch_fn, retries: int = 1, retry_delay: float = 5.0):
+    """
+    Runs fetch_fn(), retrying up to `retries` extra times on failure
+    (absorbing a short blip) before giving up and falling back to
+    whatever this source's cache already holds — which may be
+    yesterday's data (fine, these sources change slowly) or nothing at
+    all (a source that has never once succeeded). Only overwrites the
+    cache when a fetch actually succeeds, so a bad run never erases a
+    good one. See the module docstring for why this exists.
+    """
+    cached = _get(db, cache_key)
+    last_error = None
+
+    for attempt in range(retries + 1):
+        try:
+            result = fetch_fn()
+            _set(db, cache_key, result)
+            summary["sources_ok"].append(cache_key)
+            return result
+        except Exception as e:
+            last_error = e
+            if attempt < retries:
+                time.sleep(retry_delay)
+
+    summary["sources_failed"].append({"source": cache_key, "error": str(last_error)})
+    if cached is not None:
+        summary["sources_reused_from_cache"].append(cache_key)
+        return cached
+    return None
+
+
 def refresh_all(db: Session) -> dict:
-    summary = {"sources_ok": [], "sources_failed": [], "municipalities_osm_failed": [], "boundaries_failed": []}
+    summary = {
+        "sources_ok": [], "sources_failed": [], "sources_reused_from_cache": [],
+        "boundaries_failed": [],
+    }
 
     _set(db, "municipalities", static_municipalities())
     boundaries = get_cached_boundaries(db)
 
-    crime_by_geo, crime_year = {}, None
-    try:
-        crime_by_geo, crime_year = fetch_crime_severity_index()
-        summary["sources_ok"].append("crime_severity_index")
-    except Exception as e:
-        summary["sources_failed"].append({"source": "crime_severity_index", "error": str(e)})
+    crime_cached = _fetch_with_fallback(db, summary, "raw_crime", fetch_crime_severity_index)
+    crime_by_geo, crime_year = crime_cached if crime_cached else ({}, None)
 
-    pop_by_geo = {}
-    try:
-        pop_by_geo = fetch_population_density()
-        summary["sources_ok"].append("population_density")
-    except Exception as e:
-        summary["sources_failed"].append({"source": "population_density", "error": str(e)})
-
-    income_by_geo = {}
-    try:
-        income_by_geo = fetch_median_household_income()
-        summary["sources_ok"].append("median_household_income")
-    except Exception as e:
-        summary["sources_failed"].append({"source": "median_household_income", "error": str(e)})
-
-    rent_by_name = {}
-    try:
-        rent_by_name = fetch_average_rent_by_municipality([m.name for m in MUNICIPALITIES])
-        summary["sources_ok"].append("average_rent")
-    except Exception as e:
-        summary["sources_failed"].append({"source": "average_rent", "error": str(e)})
+    pop_by_geo = _fetch_with_fallback(db, summary, "raw_population", fetch_population_density) or {}
+    income_by_geo = _fetch_with_fallback(db, summary, "raw_income", fetch_median_household_income) or {}
+    rent_by_name = _fetch_with_fallback(
+        db, summary, "raw_rent",
+        lambda: fetch_average_rent_by_municipality([m.name for m in MUNICIPALITIES]),
+    ) or {}
+    # One whole-region OSM extract download + local count (see
+    # livability_osm_extract.py), not 22 individual live queries — only
+    # possible once at least some boundaries are cached, and only
+    # covers whichever municipalities' boundaries were already cached
+    # *before* this run (any fetched further down in this same run
+    # show up in next run's OSM pass instead).
+    osm_by_municipality = _fetch_with_fallback(
+        db, summary, "raw_osm_counts",
+        lambda: fetch_all_osm_counts(boundaries),
+    ) or {}
 
     places = {}
     for m in MUNICIPALITIES:
@@ -188,16 +230,11 @@ def refresh_all(db: Session) -> dict:
             "note": "rent, not resale/purchase price — see README",
         }
 
-        osm_counts = None
-        try:
-            osm_counts = fetch_osm_counts(m.osm_area_name)
-        except Exception as e:
-            summary["municipalities_osm_failed"].append({"municipality": m.id, "error": str(e)})
-
+        osm_counts = osm_by_municipality.get(m.id)
         for criterion_key, unit_label in [
             ("walkability", "amenities per km² (grocery/restaurant/cafe/pharmacy density — a proxy, not a real Walk Score)"),
             ("transit", "transit stops per km²"),
-            ("green_space", "park/green-space features per km²"),
+            ("green_space", "park/green-space features per km² — undercounts large parks tagged as polygons, not points; see livability_osm_extract.py"),
         ]:
             count = osm_counts.get(criterion_key) if osm_counts else None
             per_km2 = (count / land_area) if (count is not None and land_area) else None
@@ -205,8 +242,8 @@ def refresh_all(db: Session) -> dict:
                 "value": per_km2,
                 "raw_count": count,
                 "unit": unit_label,
-                "as_of": "current OpenStreetMap data",
-                "source": "OpenStreetMap (Overpass API)",
+                "as_of": "current OpenStreetMap data (BBBike Vancouver-region extract)",
+                "source": "OpenStreetMap",
                 "note": None,
             }
 
