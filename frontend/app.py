@@ -514,6 +514,16 @@ with places_tab:
     if meta.get("computed_at"):
         st.caption(f"Data last refreshed: {meta['computed_at']}")
 
+    # Coverage per criterion — how many municipalities actually have a
+    # value right now. Shown next to every slider so it's obvious
+    # up front which criteria are "live" today vs. still filling in,
+    # rather than discovering it only after an empty ranking.
+    coverage = {
+        c["key"]: sum(1 for p in places.values() if p["criteria"].get(c["key"], {}).get("value") is not None)
+        for c in LIVABILITY_CRITERIA
+    }
+    n_places = len(places)
+
     st.markdown("**How much does each criterion matter to you?**")
     weight_cols = st.columns(len(LIVABILITY_CRITERIA))
     weights, directions = {}, {}
@@ -525,11 +535,20 @@ with places_tab:
                 directions[key] = st.checkbox("Denser is better", value=True, key=f"dir_{key}")
             else:
                 directions[key] = criterion["higher_is_better"]
+            covered = coverage[key]
+            st.caption(f"✅ {covered}/{n_places} municipalities" if covered > 0 else "⏳ not loaded yet")
 
     rankings = _compute_rankings(places, weights, directions)
 
     if rankings["composite"].isna().all():
-        st.info("Set at least one weight above 0 to see a ranking.")
+        weighted_labels = [c["label"] for c in LIVABILITY_CRITERIA if weights[c["key"]] > 0]
+        st.warning(
+            "No municipality has data yet for **any** of the criteria you've weighted "
+            f"({', '.join(weighted_labels)}) — see the ✅/⏳ counts above each slider. "
+            "Try weighting a criterion marked ✅ instead (Population density and "
+            "Household income are usually the most reliably populated), or click "
+            "**🔄 Refresh data** above after the next scheduled backend refresh."
+        )
     else:
         st.divider()
         st.markdown("**Heat map**")
