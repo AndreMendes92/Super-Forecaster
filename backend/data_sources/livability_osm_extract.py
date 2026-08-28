@@ -15,19 +15,39 @@ endpoint) and counts matching features locally — the same kind of fix
 that worked for StatCan (a bulk file download instead of a live API
 call). BBBike is a completely different host/hosting setup than every
 Overpass instance already tried, so there's real reason to expect this
-avoids whatever is blocking those specifically.
+avoids whatever is blocking those specifically. Confirmed reachable
+from Render (see below) — the live download itself is no longer the
+open question it once was.
 
-UNVERIFIED as of this module's first version — this session had no
-outbound network access to confirm download.bbbike.org is actually
-reachable from Render. What *is* independently confirmed: the exact
-extract URL (found via search, cross-referenced against a real
-third-party OSM-download library that uses the same URL pattern) and
-the parsing/matching/point-in-polygon logic (tested end-to-end in this
-session against a hand-built OSM XML fixture — osmium correctly parsed
-tagged nodes, matched them against the criteria below, and correctly
-included/excluded points based on which prepared shapely polygon
-contains them). The one thing genuinely untested is the live download
-itself — check /livability/refresh-cache's summary after deploying.
+The parsing/matching/point-in-polygon logic (osmium + shapely,
+described below) was verified end-to-end in this session against a
+hand-built OSM XML fixture before ever deploying. What deploying it
+revealed instead: three consecutive live refreshes all left the
+cache's `meta` timestamp completely frozen — not updated even once,
+which livability_cache.py's refresh_all() does after *every single
+municipality* in its main loop. The OSM fetch runs before that loop
+starts, so the only way to get zero writes across three separate runs
+is the whole backend process dying outright — a segfault or an
+OOM-kill (Render's free tier caps memory at 512MB; a full metro-area
+.osm.pbf plus osmium/shapely parsing is a real risk of hitting that),
+neither of which a Python try/except can catch. Compounding suspect:
+this session's own osmium/shapely testing was done under Python
+3.11.15, while Render's build log has shown Python 3.14.3 — a very new
+release those C-extension wheels may not fully support.
+
+Fixed by moving the actual download+parse into its own OS process
+(_osm_extract_worker.py, launched via subprocess.run() below) instead
+of running it in the same process as the web server. A crash in there
+now only takes down that child process — fetch_all_osm_counts() treats
+a non-zero exit, a timeout, or unparseable output the same as any other
+_fetch_with_fallback failure (this source is unavailable for this run,
+falls back to last-known-good), so the rest of refresh_all() — crime,
+population, income, rent, and the per-municipality loop — keeps running
+regardless of what happens to OSM parsing. This doesn't yet prove
+*why* the crash happens (still unconfirmed whether it's OOM, a Python
+3.14 incompatibility, or something else — Render's own process logs
+around the crash would confirm which), but it stops that one source
+from being able to take the whole app down with it either way.
 
 Uses pyosmium (Python bindings for the C++ libosmium library) to
 stream the extract rather than loading a parsed structure into memory,
@@ -37,15 +57,22 @@ boundary (see livability_boundaries.py) using shapely.prepared for
 fast repeated contains() checks across every node in the extract.
 """
 
-import tempfile
+import json
+import os
+import subprocess
+import sys
 
 import osmium
 import shapely.geometry as sgeom
-from shapely.prepared import prep
-
-from . import ipv4_http
 
 BBBIKE_EXTRACT_URL = "https://download.bbbike.org/osm/bbbike/Vancouver/Vancouver.osm.pbf"
+
+_WORKER_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_osm_extract_worker.py")
+# Generous, but still well inside what would let a fully-hung child
+# run out the clock on the rest of refresh_all() — the download alone
+# is given 120s (see _osm_extract_worker.py), so this leaves real
+# headroom for the osmium parse pass on top of that.
+_WORKER_TIMEOUT_SECONDS = 240
 
 _WALKABILITY_TAG_PAIRS = {
     ("shop", "supermarket"), ("shop", "convenience"), ("shop", "greengrocer"),
@@ -129,7 +156,10 @@ def fetch_all_osm_counts(municipality_boundaries: dict) -> dict:
     every criterion for every municipality in a single streaming pass
     — far cheaper than the old per-municipality live Overpass queries,
     and doesn't depend on a query API that's turned out to be blocked
-    from Render's network entirely.
+    from Render's network entirely. The actual download+parse runs in
+    a separate OS process (_osm_extract_worker.py) — see this module's
+    docstring for why: it crashed the whole backend process outright
+    on Render, in a way no in-process try/except could catch.
 
     Returns {municipality_id: {"walkability": int, "transit": int,
     "green_space": int}} for every municipality with a usable cached
@@ -139,24 +169,42 @@ def fetch_all_osm_counts(municipality_boundaries: dict) -> dict:
     municipality) will just come back with all-zero counts,
     indistinguishable here from "really has none nearby" — a known
     limitation, not a crash.
-    """
-    resp = ipv4_http.get(BBBIKE_EXTRACT_URL, timeout=120)
-    resp.raise_for_status()
-    pbf_bytes = resp.content
 
-    polygons = {}
-    for municipality_id, geometry in municipality_boundaries.items():
-        try:
-            polygons[municipality_id] = prep(sgeom.shape(geometry))
-        except Exception:
-            continue
-    if not polygons:
+    Raises a plain Python exception — caught by
+    livability_cache._fetch_with_fallback() same as any other source —
+    if the worker process times out, exits non-zero (including from a
+    segfault or an OOM-kill, which produce an abnormal/negative
+    returncode rather than output), or produces output that isn't the
+    JSON it's supposed to print on success.
+    """
+    if not municipality_boundaries:
         raise ValueError("No usable municipality boundary polygons to count OSM features against (none cached yet?).")
 
-    with tempfile.NamedTemporaryFile(suffix=".osm.pbf") as f:
-        f.write(pbf_bytes)
-        f.flush()
-        handler = _CountingHandler(polygons)
-        osmium.apply(f.name, handler)
+    try:
+        proc = subprocess.run(
+            [sys.executable, _WORKER_SCRIPT],
+            input=json.dumps(municipality_boundaries),
+            capture_output=True,
+            text=True,
+            timeout=_WORKER_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(
+            f"OSM extract worker timed out after {_WORKER_TIMEOUT_SECONDS}s "
+            "(download+parse taking too long, or hung) — see livability_osm_extract.py"
+        ) from e
 
-    return handler.counts
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"OSM extract worker exited with code {proc.returncode} — likely a native-level "
+            "crash or out-of-memory kill in osmium/shapely, isolated to this subprocess rather "
+            f"than the main backend process. stderr: {(proc.stderr or '')[-2000:]}"
+        )
+
+    try:
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            f"OSM extract worker produced unparseable output: {proc.stdout[:500]!r} "
+            f"/ stderr: {(proc.stderr or '')[-1000:]}"
+        ) from e
