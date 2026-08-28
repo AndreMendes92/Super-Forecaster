@@ -95,11 +95,32 @@ Render's network outright (confirmed across five independent public
 instances, at the raw connection level — not something TLS
 impersonation or more mirrors could fix), so walkability/transit/green
 space now come from a downloaded OpenStreetMap data extract processed
-locally instead (see `backend/data_sources/livability_osm_extract.py`
-— unverified whether *that* download works from Render, since this
-was also built without live access); and CMHC's rent URL needed a
-human with a browser to find (now set via `CMHC_RENT_XLSX_URL`,
-pending its own first live verification).
+locally instead (see `backend/data_sources/livability_osm_extract.py`);
+and CMHC's rent URL needed a human with a browser to find (now set via
+`CMHC_RENT_XLSX_URL`).
+
+A third, worse issue turned up once the OSM-extract code actually
+deployed: three consecutive refresh runs left the cache completely
+frozen — not one municipality updated, on any of them. Since
+`refresh_all()` writes progress after *every* municipality, that only
+makes sense if the whole backend process was dying outright, before
+its main loop even started — a segfault or an out-of-memory kill
+(Render's free tier caps memory at 512MB, and a full metro-area
+`.osm.pbf` plus osmium/shapely parsing is a real way to hit that),
+neither of which Python's own error handling can catch. Compounding
+suspect: Render's build log showed Python 3.14.3 — a very new release
+— while `osmium`/`shapely` were only verified against 3.11 before
+deploying. Fixed two ways: `render.yaml` now pins `PYTHON_VERSION` to
+`3.11.9`, a release both libraries have long-established wheel support
+for; and the OSM download+parse now runs in its own OS process
+(`backend/data_sources/_osm_extract_worker.py`), launched via
+`subprocess.run()` with a timeout, so if it *does* crash again, it can
+only take down that child process — the rest of the refresh (crime,
+population, income, rent, and every municipality) keeps going
+regardless. If your Render service wasn't created from this repo's
+`render.yaml` as a Blueprint, that `PYTHON_VERSION` change won't apply
+automatically — set it by hand under the service's Environment tab on
+Render.
 
 A second lesson, learned from a run where StatCan happened to fail all
 three of its tables at once: every refresh now caches each source's
