@@ -62,9 +62,9 @@ is free public data, no API key or signup required:
 |---|---|---|
 | Safety | Statistics Canada, Crime Severity Index by police service (table 35-10-0063-01) | Lower = safer. A few municipalities share one police service (e.g. Maple Ridge + Pitt Meadows both under Ridge Meadows RCMP) and get the same value — noted in the detail view. A handful of smaller municipalities don't have a confidently-mapped police service yet and show "not available" rather than a guessed number (see `backend/data_sources/livability_geography.py`). |
 | Affordability | CMHC Rental Market Survey data tables | **Average rent, not resale/purchase price** — no free, structured, per-municipality source of resale housing prices exists (same gap as the NHPI section above). This is, by a wide margin, this tab's shakiest data source — see `backend/data_sources/livability_cmhc.py`. |
-| Walkability | OpenStreetMap (Overpass API) | Density of grocery stores, restaurants, cafes, and pharmacies. An **amenity-density proxy**, explicitly not a real Walk Score (which would require a paid or signup API key, out of scope for this free-only build). |
-| Transit access | OpenStreetMap (Overpass API) | Density of bus stops, transit platforms, and rail stations. |
-| Green space | OpenStreetMap (Overpass API) | Density of parks, gardens, and nature reserves. |
+| Walkability | OpenStreetMap (downloaded data extract) | Density of grocery stores, restaurants, cafes, and pharmacies. An **amenity-density proxy**, explicitly not a real Walk Score (which would require a paid or signup API key, out of scope for this free-only build). |
+| Transit access | OpenStreetMap (downloaded data extract) | Density of bus stops, transit platforms, and rail stations. |
+| Green space | OpenStreetMap (downloaded data extract) | Density of parks, gardens, and nature reserves — undercounts large parks (OSM usually tags those as polygons, and this only counts point-tagged features; see `backend/data_sources/livability_osm_extract.py`). |
 | Population density | Statistics Canada, 2021 Census (table 98-10-0002-01) | People per km². Shown, but **not counted in the ranking by default** — "denser is better" is a matter of taste, not something to score objectively. Turn its weight up and pick a direction if you disagree. |
 | Household income | Statistics Canada, 2021 Census (table 98-10-0057-01) | Median household income, shown as context next to rent — also not counted by default. |
 
@@ -82,29 +82,38 @@ any that keep failing (a name that doesn't resolve) show up in
 stay missing from the map until fixed. The ranking table below the map
 works fully from the very first refresh regardless.
 
-**Honest caveat about this tab specifically**: the "Best Places to
-Live" data sources were originally wired up in an environment with no
-live network access to StatCan, CMHC, or OpenStreetMap, so the first
-real `POST /livability/refresh-cache` on Render doubled as their actual
-verification step — the same process this repo's own StatCan
-integration went through before it was solid. That first run caught
-and fixed two real bugs (StatCan's crime/census tables were being
-fetched via an unreliable WDS endpoint — switched to a direct static
-CSV download; OpenStreetMap calls were failing with Render's known
-IPv6 routing issue — switched to the same forced-IPv4 fix StatCan
-already uses). **Rent is still unresolved**: the guessed CMHC download
-URL returned a 403 (it's the HTML page that *links to* the real
-workbook, not the workbook itself). To fix it: open
-[CMHC's Rental Market Report Data Tables page](https://www.cmhc-schl.gc.ca/professionals/housing-markets-data-and-research/housing-data/data-tables/rental-market/rental-market-report-data-tables)
-in a real browser, find the current Metro Vancouver / Vancouver CMA
-data table download link (should end in `.xlsx`), and set it as
-`CMHC_RENT_XLSX_URL` in Render's environment variables — no redeploy
-or code change needed, just re-run the refresh workflow after. Until
-then, the "Affordability" criterion shows "not available" for every
-municipality; everything else should be populated. Weighting/ranking
-math itself is fully tested (see the "Compute rankings" logic in
+**Honest caveat about this tab specifically**: its data sources were
+originally wired up in an environment with no live network access to
+StatCan, CMHC, or OpenStreetMap, so the first several real
+`POST /livability/refresh-cache` runs on Render doubled as their actual
+verification step, the same process this repo's own StatCan
+integration went through before it was solid. That process caught and
+fixed a real string of issues — StatCan's crime/census tables needed a
+direct static-CSV download instead of an unreliable WDS endpoint;
+OpenStreetMap's live Overpass query API turned out to be blocked from
+Render's network outright (confirmed across five independent public
+instances, at the raw connection level — not something TLS
+impersonation or more mirrors could fix), so walkability/transit/green
+space now come from a downloaded OpenStreetMap data extract processed
+locally instead (see `backend/data_sources/livability_osm_extract.py`
+— unverified whether *that* download works from Render, since this
+was also built without live access); and CMHC's rent URL needed a
+human with a browser to find (now set via `CMHC_RENT_XLSX_URL`,
+pending its own first live verification).
+
+A second lesson, learned from a run where StatCan happened to fail all
+three of its tables at once: every refresh now caches each source's
+last successful fetch permanently and only overwrites it when a new
+fetch actually succeeds (see `backend/data_sources/livability_cache.py`)
+— so once a source has worked even once, a later bad-luck run against
+a flaky free government API doesn't erase it, it just skips updating
+it until the next successful fetch. Weighting/ranking math itself has
+been fully tested from the start (see `_compute_rankings` in
 `frontend/app.py`) — it was always the raw data fetches that needed
-that real-world check.
+real-world checking, and that process is ongoing: check
+`/livability/refresh-cache`'s response summary (also printed to
+Render's logs) after any deploy touching a data source to see exactly
+what succeeded, failed, or fell back to cache.
 
 ---
 
