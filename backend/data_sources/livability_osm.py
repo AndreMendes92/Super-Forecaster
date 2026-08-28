@@ -43,6 +43,16 @@ individual mirror failure was reasonably fast in practice. Two fixes:
 a much shorter per-attempt timeout (dead mirrors should fail fast, not
 eventually), and remembering which mirror last worked so later calls
 try it first instead of re-discovering it from scratch every time.
+
+A third: even with the mirror list, real logs showed one query getting
+a plain "HTTP 406 Not Acceptable" back — the exact bot-detection
+signature that used to block StatCan's calls too, before Chrome TLS
+impersonation fixed it (see statcan_http.py). The other mirrors are
+outright refusing the TCP connection rather than returning an HTTP
+error, so impersonation may not rescue those — but it's a cheap,
+already-proven fix to try given the one clear evidence point for it.
+Unverified as of this edit; check /livability/refresh-cache's summary
+after deploying.
 """
 
 from . import ipv4_http
@@ -120,7 +130,7 @@ def _run_count_query(osm_area_name: str, tag_fragment: str) -> int:
             # across 3 mirrors x 3 criteria x 22 municipalities, is what
             # made a fully-failing refresh run long enough for Render
             # to kill the process before it ever finished.
-            resp = ipv4_http.post(url, data={"data": query}, timeout=20)
+            resp = ipv4_http.post(url, data={"data": query}, timeout=20, impersonate="chrome124")
             resp.raise_for_status()
         except Exception as e:
             last_network_error = e
